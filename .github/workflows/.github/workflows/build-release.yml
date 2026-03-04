@@ -1,0 +1,59 @@
+name: Build & Release (PyInstaller)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed --name RHOPlanner main.py
+
+      - name: Package (Windows zip)
+        if: runner.os == 'Windows'
+        run: |
+          powershell -Command "Compress-Archive -Path dist/RHOPlanner -DestinationPath RHOPlanner_windows.zip -Force"
+
+      - name: Package (macOS zip)
+        if: runner.os == 'macOS'
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/RHOPlanner.app RHOPlanner_macos.zip
+
+      - name: Package (Linux tar.gz)
+        if: runner.os == 'Linux'
+        run: |
+          tar -czf RHOPlanner_linux.tar.gz -C dist RHOPlanner
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            RHOPlanner_windows.zip
+            RHOPlanner_macos.zip
+            RHOPlanner_linux.tar.gz
