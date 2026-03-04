@@ -14,7 +14,7 @@ import pandas as pd
 # Matplotlib setup
 # ---------------------------
 import matplotlib
-matplotlib.use("QtAgg")
+matplotlib.use("QtAgg")  # required for embedded Qt canvas
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import (
@@ -194,14 +194,14 @@ class PlanRow:
     vmag: str = "N/A"
     open_time: str = "—"
     close_time: str = "—"
-    notes: str = ""  
+    notes: str = ""  # empty by default (tooltip used when not empty)
 
 
 # =============================================================================
 # Workers
 # =============================================================================
 class PlanWorker(QThread):
-    finished = Signal(list, object, list, list) 
+    finished = Signal(list, object, list, list)  # updated_plan, altitude_fig, coords, names
     failed = Signal(str)
 
     def __init__(self, plan: List[PlanRow], min_alt: float, max_alt: float):
@@ -217,7 +217,7 @@ class PlanWorker(QThread):
             names = []
 
             for row in self.plan:
-                # Resolve
+                # --- Resolve (robustly) ---
                 try:
                     rt = core.resolve_target(row.name, row.ra, row.dec)
                     resolved_ok = True
@@ -246,7 +246,7 @@ class PlanWorker(QThread):
                 except Exception:
                     pass
 
-                # Visibility window
+                # --- Visibility window ---
                 try:
                     t1, t2 = core.compute_visibility_window(rt.coord, self.min_alt, self.max_alt)
                 except Exception:
@@ -255,7 +255,7 @@ class PlanWorker(QThread):
                 open_s = t1.strftime("%H:%M") if t1 is not None else "—"
                 close_s = t2.strftime("%H:%M") if t2 is not None else "—"
 
-                # Vmag preference
+                # --- Vmag preference ---
                 preferred_vmag = row.vmag
                 if str(preferred_vmag).strip().lower() in ("", "n/a", "na", "nan", "none", "—", "-"):
                     preferred_vmag = rt.vmag
@@ -289,9 +289,11 @@ class PlanWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+
 class FinderWorker(QThread):
     finished = Signal(int, object, object)
     failed = Signal(int, str)
+
     def __init__(self, request_id: int, name: str, ra: str, dec: str, fov1: int, fov2: int, mode: str):
         super().__init__()
         self.request_id = request_id
@@ -301,6 +303,7 @@ class FinderWorker(QThread):
         self.fov1 = fov1
         self.fov2 = fov2
         self.mode = mode
+
     def run(self):
         try:
             rt = core.resolve_target(self.name, self.ra, self.dec)
@@ -309,15 +312,21 @@ class FinderWorker(QThread):
             self.finished.emit(self.request_id, fig1, fig2)
         except Exception as e:
             self.failed.emit(self.request_id, str(e))
+
+
 from astroquery.simbad import Simbad
 
+
 class StarIdWorker(QThread):
-    finished = Signal(object)  
+    finished = Signal(object)   # dict result
     failed = Signal(str)
+
     def __init__(self, coord_candidates: list[SkyCoord], radius_arcsec: float = 120.0):
         super().__init__()
         self.cands = list(coord_candidates)
         self.radius_arcsec = float(radius_arcsec)
+
+        # Dedicated SIMBAD client for this worker (avoids shared/global state)
         self.simbad = Simbad()
         self.simbad.add_votable_fields("main_id", "ra", "dec", "flux(V)")
 
@@ -591,8 +600,10 @@ class FinderInspectorDialog(QDialog):
         for i in range(self.list_ident.count()):
             it = self.list_ident.item(i)
             meta = it.data(Qt.UserRole) or {}
+            # Only renumber items that were created by markers
             if not meta.get("is_marker", False):
                 continue
+
             n += 1
             num_text = meta.get("num_text", None)
             if num_text is not None:
@@ -600,7 +611,10 @@ class FinderInspectorDialog(QDialog):
                     num_text.set_text(str(n))
                 except Exception:
                     pass
+
+            # Update the visible text in the list: replace leading "X. " with new number
             txt = it.text()
+            # Remove an existing "N. " prefix if present
             import re
             txt2 = re.sub(r"^\s*\d+\.\s*", "", txt)
             it.setText(f"{n}. {txt2}")
@@ -612,6 +626,7 @@ class FinderInspectorDialog(QDialog):
     def _draw_numbered_marker(self, ax, x, y, number: int, label=None):
         """Draw a marker + number bubble on the plot without touching _label_counter."""
         created = []
+
         p = ax.plot(
             [x], [y],
             marker="o",
@@ -620,11 +635,13 @@ class FinderInspectorDialog(QDialog):
         )[0]
         self._ann_artists.append(p)
         created.append(p)
+
         label_artist = None
         if label:
             label_artist = ax.text(x, y, f" {label}", fontsize=10)
             self._ann_texts.append(label_artist)
             created.append(label_artist)
+
         num_artist = ax.text(
             x, y,
             f"{number}",
@@ -635,17 +652,22 @@ class FinderInspectorDialog(QDialog):
         )
         self._marker_labels.append(num_artist)
         created.append(num_artist)
+
         return created, num_artist    
     def __init__(self, parent, initial_fig, which_fov: int):
         super().__init__(parent)
         self.setWindowTitle(f"Finder Inspector (FOV{which_fov})")
         self.resize(1250, 780)
+
         self.parent_window = parent
         self.which_fov = which_fov
+
         self.mode = None
         self._press_xy = None
+
         self._rect_patch = None
         self._circle_patch = None
+
         self._ann_artists = []
         self._ann_texts = []
         self._measure_markers = []
@@ -654,32 +676,40 @@ class FinderInspectorDialog(QDialog):
         self._label_counter = 0
         self._pending_ident_item = None
         self._pending_ident_num = None
-        self._pending_ident_xy = None  
-        self._marker_labels = []  
+        self._pending_ident_xy = None  # (ax, x, y)
+        self._marker_labels = []   # matplotlib text artists for "1,2,3..."
         self._free_line = None
         self._free_xs = []
         self._free_ys = []
+
         self._id_workers = set()
+
         root = QHBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(12)
+
         left = QWidget()
         self.left_l = QVBoxLayout(left)
         self.left_l.setContentsMargins(0, 0, 0, 0)
         self.left_l.setSpacing(10)
+
         top = QWidget()
         tl = QHBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
         tl.setSpacing(10)
+
         self.fov_spin = QSpinBox()
         self.fov_spin.setRange(1, 360)
         self.fov_spin.setValue(int(parent.in_fov1.value()) if which_fov == 1 else int(parent.in_fov2.value()))
+
         btn_apply_fov = QPushButton("Update FOV")
         btn_apply_fov.setIcon(std_icon(self, "SP_BrowserReload"))
         btn_apply_fov.clicked.connect(self._request_new_finder)
+
         self.lw_spin = QSpinBox()
         self.lw_spin.setRange(1, 12)
         self.lw_spin.setValue(2)
+
         tl.addWidget(QLabel("FOV (arcmin):"))
         tl.addWidget(self.fov_spin)
         tl.addWidget(btn_apply_fov)
@@ -687,7 +717,9 @@ class FinderInspectorDialog(QDialog):
         tl.addWidget(QLabel("Line thickness:"))
         tl.addWidget(self.lw_spin)
         tl.addStretch(1)
+
         self.left_l.addWidget(top)
+
         tools_box = QGroupBox("Tools")
         tools_l = QHBoxLayout(tools_box)
         tools_l.setContentsMargins(10, 8, 10, 8)
@@ -705,9 +737,11 @@ class FinderInspectorDialog(QDialog):
         self.btn_guide = _mk_tool_btn("Mark Guide Star", "guide")
         self.btn_measure = _mk_tool_btn("Measure Separation", "measure")
         self.btn_identify = _mk_tool_btn("Identify Star", "identify")
+
         self.btn_clear = QPushButton("Clear Annotations")
         self.btn_clear.setIcon(std_icon(self, "SP_TrashIcon"))
         self.btn_clear.clicked.connect(self._clear_annotations)
+
         tools_l.addWidget(self.btn_draw_rect)
         tools_l.addWidget(self.btn_draw_circle)
         tools_l.addWidget(self.btn_free_draw)
@@ -716,22 +750,28 @@ class FinderInspectorDialog(QDialog):
         tools_l.addWidget(self.btn_identify)
         tools_l.addStretch(1)
         tools_l.addWidget(self.btn_clear)
+
         self.left_l.addWidget(tools_box)
+
         plotw = QWidget()
         self.plot_layout = QVBoxLayout(plotw)
         self.plot_layout.setContentsMargins(0, 0, 0, 0)
         self.plot_layout.setSpacing(6)
+
         self.canvas = None
         self.toolbar = None
         self._cid_press = None
         self._cid_move = None
         self._cid_rel = None
+
         self._replace_plot(initial_fig)
         self.left_l.addWidget(plotw, 1)
+
         right = QGroupBox("Identified / Labeled Objects")
         right_l = QVBoxLayout(right)
         right_l.setContentsMargins(10, 10, 10, 10)
         right_l.setSpacing(8)
+
         self.list_ident = QListWidget()
         self.list_ident.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_ident.setWordWrap(True)
@@ -740,30 +780,38 @@ class FinderInspectorDialog(QDialog):
             self.list_ident.setTextElideMode(Qt.ElideNone)
         except Exception:
             pass
+
         try:
             f = self.list_ident.font()
             f.setFamily("Consolas")
             self.list_ident.setFont(f)
         except Exception:
             pass
+
         right_l.addWidget(self.list_ident, 1)
+
         btns = QWidget()
         btns_l = QHBoxLayout(btns)
         btns_l.setContentsMargins(0, 0, 0, 0)
         btns_l.setSpacing(10)
+
         self.btn_remove_selected = QPushButton("Remove Selected")
         self.btn_remove_selected.setIcon(std_icon(self, "SP_TrashIcon"))
         self.btn_remove_selected.clicked.connect(self._remove_selected_labels)
+
         self.btn_clear_list = QPushButton("Clear List")
         self.btn_clear_list.setIcon(std_icon(self, "SP_DialogResetButton"))
         self.btn_clear_list.clicked.connect(self._clear_list)
+
         btns_l.addWidget(self.btn_remove_selected)
         btns_l.addWidget(self.btn_clear_list)
         right_l.addWidget(btns)
+
         root.addWidget(left, 1)
         root.addWidget(right, 0)
         root.setStretch(0, 4)
         root.setStretch(1, 1)
+
         self._update_wcs_hint_in_title()
 
     def _sizehint_for_text(self, txt: str) -> QSize:
@@ -822,10 +870,13 @@ class FinderInspectorDialog(QDialog):
             except Exception:
                 pass
             self.canvas.setParent(None)
+
         self.canvas = FigureCanvas(fig)
         self.toolbar = NavigationToolbar(self.canvas, self)
+
         self.plot_layout.addWidget(self.toolbar)
         self.plot_layout.addWidget(self.canvas, 1)
+
         self._cid_press = self.canvas.mpl_connect("button_press_event", self._on_press)
         self._cid_move = self.canvas.mpl_connect("motion_notify_event", self._on_move)
         self._cid_rel = self.canvas.mpl_connect("button_release_event", self._on_release)
@@ -839,9 +890,11 @@ class FinderInspectorDialog(QDialog):
     def _ax(self):
         if not self.canvas or not self.canvas.figure:
             return None
+
         axes = list(self.canvas.figure.axes)
         if not axes:
             return None
+
         best = None
         for a in axes:
             w = getattr(a, "wcs", None)
@@ -853,8 +906,10 @@ class FinderInspectorDialog(QDialog):
                     break
             except Exception:
                 continue
+
         if best is not None:
             return best
+
         try:
             return max(axes, key=lambda a: a.get_position().width * a.get_position().height)
         except Exception:
@@ -862,12 +917,14 @@ class FinderInspectorDialog(QDialog):
 
     def _coord_candidates_from_click(self, ax, x, y) -> list[SkyCoord]:
         cands: list[SkyCoord] = []
+
         def _accept(c: SkyCoord):
             try:
                 if np.isfinite(c.ra.deg) and np.isfinite(c.dec.deg) and (-90 <= c.dec.deg <= 90):
                     cands.append(c.icrs)
             except Exception:
                 pass
+
         w = getattr(ax, "wcs", None)
         has_celestial = False
         if w is not None:
@@ -875,6 +932,7 @@ class FinderInspectorDialog(QDialog):
                 has_celestial = bool(getattr(w, "has_celestial", False) and w.has_celestial)
             except Exception:
                 has_celestial = False
+
         if has_celestial:
             for origin in (0, 1):
                 try:
@@ -883,20 +941,24 @@ class FinderInspectorDialog(QDialog):
                         _accept(c)
                 except Exception:
                     pass
+
             try:
                 c2 = w.pixel_to_world(float(x), float(y))
                 if isinstance(c2, SkyCoord):
                     _accept(c2)
             except Exception:
                 pass
+
         try:
             _accept(SkyCoord(float(x) * u.deg, float(y) * u.deg, frame="icrs"))
         except Exception:
             pass
+
         try:
             _accept(SkyCoord(float(x) * u.hourangle, float(y) * u.deg, frame="icrs"))
         except Exception:
             pass
+
         uniq: list[SkyCoord] = []
         for c in cands:
             if not uniq:
@@ -907,6 +969,7 @@ class FinderInspectorDialog(QDialog):
                         uniq.append(c)
                 except Exception:
                     uniq.append(c)
+
         return uniq
 
     def _lw(self) -> float:
@@ -925,14 +988,18 @@ class FinderInspectorDialog(QDialog):
 
     def _set_mode(self, mode: str | None):
         self.mode = mode
+
         self._press_xy = None
         self._rect_patch = None
         self._circle_patch = None
+
         if mode != "measure":
             self._measure_p1 = None
+
         self._free_line = None
         self._free_xs = []
         self._free_ys = []
+
         mapping = {
             "rect": self.btn_draw_rect,
             "circle": self.btn_draw_circle,
@@ -956,13 +1023,16 @@ class FinderInspectorDialog(QDialog):
             return
         if event.xdata is None or event.ydata is None:
             return
+
         x, y = float(event.xdata), float(event.ydata)
+
         if self.mode == "rect":
             self._press_xy = (x, y)
             self._rect_patch = Rectangle((x, y), 0, 0, fill=False, linewidth=self._lw())
             ax.add_patch(self._rect_patch)
             self.canvas.draw_idle()
             return
+
         if self.mode == "circle":
             self._press_xy = (x, y)
             from matplotlib.patches import Circle
@@ -970,36 +1040,45 @@ class FinderInspectorDialog(QDialog):
             ax.add_patch(self._circle_patch)
             self.canvas.draw_idle()
             return
+
         if self.mode == "free":
             self._free_xs = [x]
             self._free_ys = [y]
             self._free_line = ax.plot(self._free_xs, self._free_ys, "-", linewidth=self._lw())[0]
             self.canvas.draw_idle()
             return
+
         if self.mode == "guide":
             self._place_marker(ax, x, y, label="Guide")
             self._set_mode(None)
             return
+
         if self.mode == "measure":
             if self._measure_p1 is None:
                 self._clear_measure_artist()
                 self._clear_measure_points()
+
                 self._measure_p1 = (x, y)
                 p = ax.plot([x], [y], marker="o", markersize=max(4, int(self._lw() * 3)), linestyle="")[0]
                 t = ax.text(x, y, " P1", fontsize=10)
                 self._measure_markers.extend([p, t])
+
                 self.canvas.draw_idle()
                 return
+
             p2 = (x, y)
             p = ax.plot([x], [y], marker="o", markersize=max(4, int(self._lw() * 3)), linestyle="")[0]
             t = ax.text(x, y, " P2", fontsize=10)
             self._measure_markers.extend([p, t])
+
             self._draw_measurement(ax, self._measure_p1, p2)
             self._measure_p1 = None
             self.canvas.draw_idle()
             return
+
         if self._measure_p1 is None:
             self._clear_measure_artist()
+
         if self.mode == "identify":
             self._identify_at_click(ax, x, y)
             return
@@ -1012,19 +1091,23 @@ class FinderInspectorDialog(QDialog):
             return
         if event.xdata is None or event.ydata is None:
             return
+
         x, y = float(event.xdata), float(event.ydata)
+
         if self.mode == "rect" and self._press_xy and self._rect_patch:
             x0, y0 = self._press_xy
             self._rect_patch.set_width(x - x0)
             self._rect_patch.set_height(y - y0)
             self.canvas.draw_idle()
             return
+
         if self.mode == "circle" and self._press_xy and self._circle_patch:
             x0, y0 = self._press_xy
             r = float(np.hypot(x - x0, y - y0))
             self._circle_patch.set_radius(r)
             self.canvas.draw_idle()
             return
+
         if self.mode == "free" and self._free_line is not None:
             self._free_xs.append(x)
             self._free_ys.append(y)
@@ -1039,12 +1122,14 @@ class FinderInspectorDialog(QDialog):
             self._press_xy = None
             self._set_mode(None)
             return
+
         if self.mode == "circle" and self._circle_patch is not None:
             self._ann_artists.append(self._circle_patch)
             self._circle_patch = None
             self._press_xy = None
             self._set_mode(None)
             return
+
         if self.mode == "free" and self._free_line is not None:
             self._ann_artists.append(self._free_line)
             self._free_line = None
@@ -1056,11 +1141,16 @@ class FinderInspectorDialog(QDialog):
     def _place_marker(self, ax, x, y, label=None, add_to_list=True, meta=None):
         if ax is None:
             return
+
         created_artists = []
+
+        # increment numbering only if it's going into the list
         marker_num = None
         if add_to_list:
             self._label_counter += 1
             marker_num = self._label_counter
+
+        # point marker
         p = ax.plot(
             [x], [y],
             marker="o",
@@ -1069,11 +1159,15 @@ class FinderInspectorDialog(QDialog):
         )[0]
         self._ann_artists.append(p)
         created_artists.append(p)
+
+        # optional label next to marker (Guide, etc.)
         label_artist = None
         if label:
             label_artist = ax.text(x, y, f" {label}", fontsize=10)
             self._ann_texts.append(label_artist)
             created_artists.append(label_artist)
+
+        # numbered bubble on plot
         num_artist = None
         if marker_num is not None:
             num_artist = ax.text(
@@ -1086,24 +1180,32 @@ class FinderInspectorDialog(QDialog):
             )
             self._marker_labels.append(num_artist)
             created_artists.append(num_artist)
+
         self.canvas.draw_idle()
+
         if add_to_list:
             base_txt = str(label) if label else "Marker"
             list_txt = f"{marker_num}. {base_txt}" if marker_num is not None else base_txt
+
             it = self._add_list_item(list_txt, meta={})
+            # Store strong links between list item and plot artists
             it_meta = {
                 "is_marker": True,
-                "artists": created_artists,    
-                "num_text": num_artist,        
-                "raw_meta": meta or {},          
+                "artists": created_artists,      # point + label + number
+                "num_text": num_artist,          # the number bubble Text
+                "raw_meta": meta or {},          # SIMBAD payload etc.
             }
             it.setData(Qt.UserRole, it_meta)
             it.setToolTip(list_txt)
             it.setSizeHint(self._sizehint_for_text(list_txt))
+
+        # increment numbering only if it's going into the list
         marker_num = None
         if add_to_list:
             self._label_counter += 1
             marker_num = self._label_counter
+
+        # point marker
         p = ax.plot(
             [x], [y],
             marker="o",
@@ -1111,9 +1213,13 @@ class FinderInspectorDialog(QDialog):
             linestyle=""
         )[0]
         self._ann_artists.append(p)
+
+        # optional small text label like "Guide", "P1", etc.
         if label:
             t = ax.text(x, y, f" {label}", fontsize=10)
             self._ann_texts.append(t)
+
+        # numbered label rendered on the image (this is what you lost)
         if marker_num is not None:
             tn = ax.text(
                 x, y,
@@ -1124,7 +1230,10 @@ class FinderInspectorDialog(QDialog):
                 bbox=dict(boxstyle="round,pad=0.18", alpha=0.65)
             )
             self._marker_labels.append(tn)
+
         self.canvas.draw_idle()
+
+        # list entry
         if add_to_list:
             base_txt = str(label) if label else "Marker"
             if marker_num is not None:
@@ -1147,14 +1256,18 @@ class FinderInspectorDialog(QDialog):
     def _draw_measurement(self, ax, p1, p2):
         if ax is None:
             return
+
         self._clear_measure_artist()
         x1, y1 = p1
         x2, y2 = p2
         dpix = float(np.hypot(x2 - x1, y2 - y1))
+
         cands1 = self._coord_candidates_from_click(ax, x1, y1)
         cands2 = self._coord_candidates_from_click(ax, x2, y2)
+
         best_sep = None
         best_pair = None
+
         if cands1 and cands2:
             for c1 in cands1:
                 for c2 in cands2:
@@ -1165,6 +1278,7 @@ class FinderInspectorDialog(QDialog):
                             best_pair = (c1, c2)
                     except Exception:
                         pass
+
         sky_txt = ""
         if best_sep is not None and best_pair is not None:
             c1, c2 = best_pair
@@ -1176,6 +1290,7 @@ class FinderInspectorDialog(QDialog):
             except Exception:
                 pa_txt = ""
             sky_txt = f"{sep_as:.1f}\" ({sep_am:.2f}′){pa_txt}"
+
         line = ax.plot([x1, x2], [y1, y2], "-", linewidth=self._lw())[0]
         txt = ax.text(
             (x1 + x2) / 2.0, (y1 + y2) / 2.0,
@@ -1184,6 +1299,7 @@ class FinderInspectorDialog(QDialog):
             ha="left", va="bottom",
             bbox=dict(boxstyle="round,pad=0.25", alpha=0.6)
         )
+
         self._measure_artist = (line, txt)
         self.canvas.draw_idle()
 
@@ -1229,32 +1345,43 @@ class FinderInspectorDialog(QDialog):
             if meta.get("is_marker", False):
                 self._remove_artists(meta.get("artists", []))
             self.list_ident.takeItem(self.list_ident.row(it))
+
+        # Re-number what remains
         self._rebuild_numbering()
 
     def _clear_list(self):
+        # Remove all marker artists associated with the list
         for i in range(self.list_ident.count()):
             it = self.list_ident.item(i)
             meta = it.data(Qt.UserRole) or {}
             if meta.get("is_marker", False):
                 self._remove_artists(meta.get("artists", []))
+
         self.list_ident.clear()
+
+        # Reset counters and internal references
         self._label_counter = 0
         self._marker_labels.clear()
         self._ann_artists.clear()
         self._ann_texts.clear()
+
         self.canvas.draw_idle()
-      
+
     def _identify_at_click(self, ax, x, y):
         cands = self._coord_candidates_from_click(ax, x, y)
         if not cands:
             QMessageBox.information(self, "Identify", "Could not interpret click coordinates (no WCS?).")
             return
+
+        # ---- Create ONE pending list entry up front (no marker yet) ----
         self._label_counter += 1
         num = self._label_counter
+
         pending_text = f"{num}. (querying SIMBAD...)"
         it = QListWidgetItem(pending_text)
         it.setToolTip(pending_text)
         it.setSizeHint(self._sizehint_for_text(pending_text))
+
         it_meta = {
             "is_marker": True,
             "artists": [],
@@ -1263,9 +1390,12 @@ class FinderInspectorDialog(QDialog):
         }
         it.setData(Qt.UserRole, it_meta)
         self.list_ident.addItem(it)
+
         self._pending_ident_item = it
         self._pending_ident_num = num
         self._pending_ident_xy = (ax, float(x), float(y))
+
+        # Status bar feedback
         try:
             self.parent_window.statusBar().showMessage("Querying SIMBAD…")
         except Exception:
@@ -1273,34 +1403,46 @@ class FinderInspectorDialog(QDialog):
 
         w = StarIdWorker(cands, radius_arcsec=600.0)
         self._id_workers.add(w)
-      
+
         def _cleanup():
             self._id_workers.discard(w)
             w.deleteLater()
 
         def _finish_with_text(text_block: str, meta_payload: dict):
+            # If the dialog was cleared while query was running, just bail safely
             if self._pending_ident_item is None or self._pending_ident_xy is None:
                 return
+
             ax0, x0, y0 = self._pending_ident_xy
             num0 = int(self._pending_ident_num)
+
+            # Draw exactly ONE marker for this identify action
             artists, num_artist = self._draw_numbered_marker(ax0, x0, y0, num0, label=None)
+
+            # Attach artists to the existing list item
             it0 = self._pending_ident_item
             m = it0.data(Qt.UserRole) or {}
             m["artists"] = artists
             m["num_text"] = num_artist
             m["raw_meta"] = meta_payload or {}
             it0.setData(Qt.UserRole, m)
+
+            # Update list text (keep the "N. " prefix)
             full_text = f"{num0}. {text_block}"
             it0.setText(full_text)
             it0.setToolTip(full_text)
             it0.setSizeHint(self._sizehint_for_text(full_text))
+
             self.canvas.draw_idle()
+
+            # clear pending state
             self._pending_ident_item = None
             self._pending_ident_num = None
             self._pending_ident_xy = None
 
         def _ok(res):
             if not res.get("ok", False):
+                # Build a useful "no match" display
                 try:
                     c0 = cands[0]
                     ra_s = c0.ra.to_string(unit=u.hour, sep=":", precision=2)
@@ -1310,16 +1452,20 @@ class FinderInspectorDialog(QDialog):
                 except Exception:
                     text_block = "Unknown (no match)"
                     meta_payload = {"ok": False}
+
                 _finish_with_text(text_block, meta_payload)
+
                 try:
                     self.parent_window.statusBar().showMessage("SIMBAD identify: no match.")
                 except Exception:
                     pass
                 return
+
             main_id = res.get("main_id", "Unknown")
             vmag_txt = self._fmt_vmag(res.get("vmag", None))
             sep_txt = self._fmt_sep_arcsec(res.get("sep_arcsec", None))
             cbest = res.get("coord", None)
+
             line1 = str(main_id)
             extras = []
             if vmag_txt:
@@ -1328,17 +1474,21 @@ class FinderInspectorDialog(QDialog):
                 extras.append(sep_txt)
             if extras:
                 line1 += "  " + "  ".join(extras)
+
             lines = [line1]
             if cbest is not None:
                 ra_s = cbest.ra.to_string(unit=u.hour, sep=":", precision=2)
                 dec_s = cbest.dec.to_string(unit=u.deg, sep=":", precision=1, alwayssign=True)
                 lines.append(f"RA={ra_s}  Dec={dec_s}")
+
             text_block = "\n".join(lines)
             _finish_with_text(text_block, res)
+
             try:
                 self.parent_window.statusBar().showMessage("SIMBAD identify complete.")
             except Exception:
                 pass
+
         w.finished.connect(_ok)
         w.finished.connect(_cleanup)
         w.failed.connect(lambda msg: QMessageBox.warning(self, "SIMBAD query failed", msg))
@@ -1350,11 +1500,13 @@ class FinderInspectorDialog(QDialog):
         if self.parent_window._selected_row is None:
             QMessageBox.information(self, "No target", "Select a target first.")
             return
+
         new_fov = int(self.fov_spin.value())
         if self.which_fov == 1:
             self.parent_window.in_fov1.setValue(new_fov)
         else:
             self.parent_window.in_fov2.setValue(new_fov)
+
         self.parent_window._open_finder_dialog_request = self
         self.parent_window.on_row_selected()
 
@@ -1364,43 +1516,57 @@ class FinderInspectorDialog(QDialog):
 # =============================================================================
 class MainWindow(QMainWindow):
     def reset_defaults(self):
+        # Restore default date/location/timezone
         self.date_edit.setDate(self._default_plan_date)
+
         self.lat_spin.setValue(float(self._default_site.lat))
         self.lon_spin.setValue(float(self._default_site.lon))
         self.height_spin.setValue(float(self._default_site.height_m))
         self.tz_combo.setCurrentText(str(self._default_site.timezone))
+
+        # Restore Planning Settings defaults too (since user asked "everything")
         self.in_min_alt.setValue(self._default_min_alt)
         self.in_max_alt.setValue(self._default_max_alt)
         self.in_fov1.setValue(self._default_fov1)
         self.in_fov2.setValue(self._default_fov2)
         self.in_survey.setCurrentText(self._default_survey)
+
+        # Apply immediately so sky conditions/plots update
         self.apply_date_location(initial=False)
 
     def __init__(self):
         self._alt_dialog = None
         self._finder_dialog_fov1 = None
         self._finder_dialog_fov2 = None
+
         super().__init__()
         self.setWindowTitle("Observing Planner (Desktop)")
         self.resize(1650, 920)
         self.setMinimumSize(1500, 840)
+
+        # Status bar
         self.statusBar().showMessage("Ready")
+
         self.plan: List[PlanRow] = []
         self._finder_workers = set()
         self._plan_workers = set()
         self._finder_request_id = 0
+
         self._last_coords = []
         self._last_names = []
         self._selected_row = None
         self._open_finder_dialog_request = None
+
         root = QWidget()
         self.setCentralWidget(root)
         layout = QHBoxLayout(root)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(12)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter)
+
         # -------------------------
         # Left panel
         # -------------------------
@@ -1408,15 +1574,19 @@ class MainWindow(QMainWindow):
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(6, 6, 6, 6)
         left_l.setSpacing(10)
+
         plan_box = QGroupBox("Planning Setup")
         plan_form = QFormLayout(plan_box)
         plan_form.setContentsMargins(10, 8, 10, 8)
         plan_form.setVerticalSpacing(8)
+
         self.date_edit = QDateEdit()
         self.date_edit.setCalendarPopup(True)
         today = QDate.currentDate()
         self.date_edit.setDate(today)
+
         site = core.get_site_config()
+        # --- Defaults snapshot (used by "Reset Defaults") ---
         self._default_site = site
         self._default_plan_date = QDate.currentDate()
         self._default_min_alt = int(core.DEFAULT_MIN_ALT_DEG)
@@ -1424,32 +1594,43 @@ class MainWindow(QMainWindow):
         self._default_fov1 = int(core.DEFAULT_FOV1_ARCMIN)
         self._default_fov2 = int(core.DEFAULT_FOV2_ARCMIN)
         self._default_survey = "DSS"
+
         self.lat_spin = QDoubleSpinBox()
         self.lat_spin.setRange(-90.0, 90.0)
         self.lat_spin.setDecimals(6)
         self.lat_spin.setValue(site.lat)
+
         self.lon_spin = QDoubleSpinBox()
         self.lon_spin.setRange(-180.0, 180.0)
         self.lon_spin.setDecimals(6)
         self.lon_spin.setValue(site.lon)
+
         self.height_spin = QDoubleSpinBox()
         self.height_spin.setRange(-500.0, 9000.0)
         self.height_spin.setDecimals(1)
         self.height_spin.setValue(site.height_m)
+
         self.tz_combo = QComboBox()
         self.tz_combo.setEditable(True)
+
+        # Common timezones (include yours + a few useful ones)
         tz_list = [
             "US/Eastern", "US/Central", "US/Mountain", "US/Pacific",
             "UTC",
         ]
         self.tz_combo.addItems(tz_list)
+
+        # Set initial timezone from site config
         self.tz_combo.setCurrentText(site.timezone)
+
         self.btn_apply = QPushButton("Apply date/location")
         self.btn_apply.setIcon(std_icon(self, "SP_DialogApplyButton"))
         self.btn_apply.clicked.connect(self.apply_date_location)
+
         self.btn_reset_defaults = QPushButton("Reset defaults")
         self.btn_reset_defaults.setIcon(std_icon(self, "SP_DialogResetButton"))
         self.btn_reset_defaults.clicked.connect(self.reset_defaults)
+
         plan_form.addRow("Date:", self.date_edit)
         plan_form.addRow("Latitude (deg):", self.lat_spin)
         plan_form.addRow("Longitude (deg):", self.lon_spin)
@@ -1462,53 +1643,66 @@ class MainWindow(QMainWindow):
         btn_row_l.addWidget(self.btn_apply)
         btn_row_l.addWidget(self.btn_reset_defaults)
         plan_form.addRow(btn_row)
+
         sky_box = QGroupBox("Sky Conditions")
         sky_form = QFormLayout(sky_box)
         sky_form.setContentsMargins(10, 8, 10, 8)
         sky_form.setVerticalSpacing(8)
+
         self.lbl_sunset = QLabel("—")
         self.lbl_moon_alt = QLabel("—")
         self.lbl_moon_illum = QLabel("—")
         self.lbl_cloud_now = QLabel("—")
         self.lbl_cloud_next = QLabel("—")
+
         sky_form.addRow("Sunset (plan date):", self.lbl_sunset)
         sky_form.addRow("Moon alt (plan date):", self.lbl_moon_alt)
         sky_form.addRow("Moon illum (plan date):", self.lbl_moon_illum)
         sky_form.addRow("Cloud cover (now):", self.lbl_cloud_now)
         sky_form.addRow("Cloud cover (+1 hr):", self.lbl_cloud_next)
+
         btn_refresh = QPushButton("Refresh")
         btn_refresh.setIcon(std_icon(self, "SP_BrowserReload"))
         btn_refresh.clicked.connect(self.refresh_sky)
+
         settings_box = QGroupBox("Planning Settings")
         settings_form = QFormLayout(settings_box)
         settings_form.setContentsMargins(10, 8, 10, 8)
         settings_form.setVerticalSpacing(8)
+
         self.in_min_alt = QSpinBox()
         self.in_min_alt.setRange(0, 90)
         self.in_min_alt.setValue(int(core.DEFAULT_MIN_ALT_DEG))
+
         self.in_max_alt = QSpinBox()
         self.in_max_alt.setRange(0, 90)
         self.in_max_alt.setValue(int(core.DEFAULT_MAX_ALT_DEG))
+
         self.in_fov1 = QSpinBox()
         self.in_fov1.setRange(1, 360)
         self.in_fov1.setValue(core.DEFAULT_FOV1_ARCMIN)
+
         self.in_fov2 = QSpinBox()
         self.in_fov2.setRange(1, 360)
         self.in_fov2.setValue(core.DEFAULT_FOV2_ARCMIN)
+
         self.in_survey = QComboBox()
         self.in_survey.addItems(["DSS", "DSS2 Red", "SkyView"])
         self.in_survey.setCurrentText("DSS")
         self.in_survey.currentIndexChanged.connect(self.refresh_finders_for_selected)
+
         settings_form.addRow("Min alt (°):", self.in_min_alt)
         settings_form.addRow("Max alt (°):", self.in_max_alt)
         settings_form.addRow("Finder FOV1 (arcmin):", self.in_fov1)
         settings_form.addRow("Finder FOV2 (arcmin):", self.in_fov2)
         settings_form.addRow("Finder source:", self.in_survey)
+
         left_l.addWidget(plan_box)
         left_l.addWidget(sky_box)
         left_l.addWidget(btn_refresh)
         left_l.addWidget(settings_box)
         left_l.addStretch(1)
+
         # -------------------------
         # Center panel
         # -------------------------
@@ -1516,27 +1710,33 @@ class MainWindow(QMainWindow):
         center_l = QVBoxLayout(center)
         center_l.setContentsMargins(6, 6, 6, 6)
         center_l.setSpacing(10)
+
         tabs = QTabWidget()
         tabs.addTab(self._build_manual_tab(), "Manual Entry")
         tabs.addTab(self._build_upload_tab(), "Upload Target List")
+
         self.tbl = QTableWidget(0, 8)
         self.tbl.setHorizontalHeaderLabels(["Name", "RA", "Dec", "Priority", "Vmag", "Open", "Close", "Notes"])
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tbl.itemSelectionChanged.connect(self.on_row_selected)
         self.tbl.setAlternatingRowColors(True)
+
         self.tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tbl.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         self.tbl.setWordWrap(False)
         try:
             self.tbl.setTextElideMode(Qt.ElideRight)
         except Exception:
             pass
+
         hh = self.tbl.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setStretchLastSection(False)
         hh.setMinimumSectionSize(70)
+
         self.tbl.setColumnWidth(0, 140)
         self.tbl.setColumnWidth(1, 80)
         self.tbl.setColumnWidth(2, 80)
@@ -1545,27 +1745,34 @@ class MainWindow(QMainWindow):
         self.tbl.setColumnWidth(5, 50)
         self.tbl.setColumnWidth(6, 50)
         self.tbl.setColumnWidth(7, 185)
+
         btn_bar = QWidget()
         btn_bar_l = QHBoxLayout(btn_bar)
         btn_bar_l.setContentsMargins(0, 0, 0, 0)
         btn_bar_l.setSpacing(10)
+
         self.btn_plan = QPushButton("Plan Observations")
         self.btn_plan.setIcon(std_icon(self, "SP_MediaPlay"))
         self.btn_plan.clicked.connect(self.plan_observations)
+
         self.btn_remove = QPushButton("Remove Selected")
         self.btn_remove.setIcon(std_icon(self, "SP_TrashIcon"))
         self.btn_remove.clicked.connect(self.remove_selected)
+
         self.btn_clear = QPushButton("Clear Plan")
         self.btn_clear.setIcon(std_icon(self, "SP_DialogResetButton"))
         self.btn_clear.clicked.connect(self.clear_plan)
+
         btn_bar_l.addWidget(self.btn_plan)
         btn_bar_l.addWidget(self.btn_remove)
         btn_bar_l.addWidget(self.btn_clear)
         btn_bar_l.addStretch(1)
+
         center_l.addWidget(tabs)
         center_l.addWidget(QLabel("Planned Targets"))
         center_l.addWidget(self.tbl, 1)
         center_l.addWidget(btn_bar)
+
         # -------------------------
         # Right panel
         # -------------------------
@@ -1573,8 +1780,11 @@ class MainWindow(QMainWindow):
         right_l = QVBoxLayout(right)
         right_l.setContentsMargins(6, 6, 6, 6)
         right_l.setSpacing(10)
+
         right_split = QSplitter(Qt.Vertical)
         right_split.setChildrenCollapsible(False)
+
+        # Card-ish container style for plot panels
         card_css = """
         QWidget {
             border: 1px solid #3a3d45;
@@ -1582,36 +1792,46 @@ class MainWindow(QMainWindow):
             background-color: rgba(21,23,28,0.45);
         }
         """
+
         alt_container = QWidget()
         alt_container.setStyleSheet(card_css)
         alt_l = QVBoxLayout(alt_container)
         alt_l.setContentsMargins(10, 10, 10, 10)
         alt_l.setSpacing(8)
         alt_l.addWidget(QLabel("Altitude Plot (selected date & location)"))
+
         self.alt_canvas = FigureCanvas(core.plt.figure(figsize=(7.8, 4.9)))
         alt_l.addWidget(self.alt_canvas, 1)
         right_split.addWidget(alt_container)
+
         finder_container = QWidget()
         finder_container.setStyleSheet(card_css)
         finder_l = QVBoxLayout(finder_container)
         finder_l.setContentsMargins(10, 10, 10, 10)
         finder_l.setSpacing(8)
         finder_l.addWidget(QLabel("Finder Charts (selected target)"))
+
         self.finder_tabs = QTabWidget()
         self.finder_canvas_1 = FigureCanvas(core.plt.figure(figsize=(7.8, 6.3)))
         self.finder_canvas_2 = FigureCanvas(core.plt.figure(figsize=(7.8, 6.3)))
         self.finder_tabs.addTab(self.finder_canvas_1, "FOV1")
         self.finder_tabs.addTab(self.finder_canvas_2, "FOV2")
         finder_l.addWidget(self.finder_tabs, 1)
+
         right_split.addWidget(finder_container)
         right_l.addWidget(right_split, 1)
+
         splitter.addWidget(left)
         splitter.addWidget(center)
         splitter.addWidget(right)
+
+        # Apply splitter sizes AFTER layout/show
         QTimer.singleShot(0, lambda: splitter.setSizes([330, 840, 520]))
         QTimer.singleShot(0, lambda: right_split.setSizes([420, 620]))
+
         self._bind_altitude_click()
         self._bind_finder_clicks()
+
         self.apply_date_location(initial=True)
 
     # -------------------------
@@ -1620,24 +1840,32 @@ class MainWindow(QMainWindow):
     def apply_date_location(self, initial: bool = False):
         try:
             self.statusBar().showMessage("Applying site/date…")
+
             qd = self.date_edit.date()
             d = date(qd.year(), qd.month(), qd.day())
             core.set_planning_date(d)
+
             lat = float(self.lat_spin.value())
             lon = float(self.lon_spin.value())
             h = float(self.height_spin.value())
             tz = self.tz_combo.currentText().strip()
             if not tz:
                 raise ValueError("Timezone cannot be blank (example: US/Eastern).")
+
             ZoneInfo(tz)
             core.set_site(lat, lon, h, tz, name=None)
+
             self.refresh_sky()
+
             if (not initial) and self.plan:
                 self.plan_observations()
+
             self.statusBar().showMessage("Ready")
+
         except Exception as e:
             self.statusBar().showMessage("Apply failed.")
             QMessageBox.critical(self, "Apply failed", str(e))
+
     # -------------------------
     # Tabs
     # -------------------------
@@ -1645,22 +1873,27 @@ class MainWindow(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         l.setSpacing(10)
+
         box = QGroupBox("Add Target")
         form = QFormLayout(box)
         form.setVerticalSpacing(8)
+
         self.in_name = QLineEdit()
         self.in_ra = QLineEdit()
         self.in_dec = QLineEdit()
         self.in_pr = QSpinBox()
         self.in_pr.setRange(1, 5)
         self.in_pr.setValue(3)
+
         form.addRow("Name:", self.in_name)
         form.addRow("RA (hh:mm:ss OR deg):", self.in_ra)
         form.addRow("Dec (dd:mm:ss OR deg):", self.in_dec)
         form.addRow("Priority:", self.in_pr)
+
         btn_add = QPushButton("Add to Plan")
         btn_add.setIcon(std_icon(self, "SP_DialogApplyButton"))
         btn_add.clicked.connect(self.add_manual)
+
         l.addWidget(box)
         l.addWidget(btn_add)
         l.addStretch(1)
@@ -1670,32 +1903,43 @@ class MainWindow(QMainWindow):
         w = QWidget()
         l = QVBoxLayout(w)
         l.setSpacing(10)
+
         btn = QPushButton("Choose CSV/XLSX…")
         btn.setIcon(std_icon(self, "SP_DialogOpenButton"))
         btn.clicked.connect(self.upload_file)
+
         self.lbl_upload = QLabel("No file loaded.")
         self.lbl_upload.setWordWrap(True)
+
         l.addWidget(btn)
         l.addWidget(self.lbl_upload)
         l.addStretch(1)
         return w
+
     # -------------------------
     # Sky
     # -------------------------
     def refresh_sky(self):
         self.statusBar().showMessage("Refreshing sky conditions…")
         cond = core.sky_conditions()
+
         sunset = cond.get("sunset_local", None)
         self.lbl_sunset.setText(sunset.strftime("%Y-%m-%d %H:%M") if sunset else "unavailable")
+
         moon_alt = cond.get("moon_alt_deg", None)
         self.lbl_moon_alt.setText(f"{moon_alt:.1f}°" if moon_alt is not None else "unavailable")
+
         illum = cond.get("moon_illum_frac", None)
         self.lbl_moon_illum.setText(f"{illum*100:.1f}%" if illum is not None else "unavailable")
+
         cloud_now = cond.get("cloud_now_pct", None)
         self.lbl_cloud_now.setText(f"{cloud_now:.0f}%" if cloud_now is not None else "unavailable")
+
         cloud_next = cond.get("cloud_next_pct", None)
         self.lbl_cloud_next.setText(f"{cloud_next:.0f}%" if cloud_next is not None else "unavailable")
+
         self.statusBar().showMessage("Ready")
+
     # -------------------------
     # Plan manipulation
     # -------------------------
@@ -1705,12 +1949,15 @@ class MainWindow(QMainWindow):
             ra = self.in_ra.text().strip()
             dec = self.in_dec.text().strip()
             pr = int(self.in_pr.value())
+
             if not (name or (ra and dec)):
                 raise ValueError("Enter a name (SIMBAD) or provide RA/Dec.")
+
             row = PlanRow(name=name, ra=ra, dec=dec, priority=pr)
             self.plan.append(row)
             self._append_table_row(row)
             self.statusBar().showMessage(f"Added target: {name or 'Unnamed'}")
+
         except Exception as e:
             self.statusBar().showMessage("Invalid target.")
             QMessageBox.critical(self, "Invalid target", str(e))
@@ -1756,25 +2003,31 @@ class MainWindow(QMainWindow):
         if not idxs:
             QMessageBox.information(self, "No selection", "Select a row in the table to remove.")
             return
+
         r = idxs[0].row()
         if r < 0 or r >= len(self.plan):
             return
+
         name = self.plan[r].name
         if QMessageBox.question(self, "Remove target", f"Remove '{name}' from the plan?") != QMessageBox.Yes:
             return
+
         self.plan.pop(r)
         self.tbl.removeRow(r)
         self._selected_row = None
         self.statusBar().showMessage(f"Removed: {name}")
+
         if not self.plan:
             self._last_coords = []
             self._last_names = []
             self._set_altitude_fig(core.plt.figure(figsize=(7.8, 4.9)))
             self._set_finder_figs(core.plt.figure(figsize=(7.8, 6.3)), core.plt.figure(figsize=(7.8, 6.3)))
             return
+
         new_r = min(r, self.tbl.rowCount() - 1)
         self.tbl.selectRow(new_r)
         self.on_row_selected()
+
     # -------------------------
     # Planning
     # -------------------------
@@ -1782,15 +2035,19 @@ class MainWindow(QMainWindow):
         if not self.plan:
             QMessageBox.information(self, "No targets", "Add at least one target to the plan.")
             return
+
         min_alt = float(self.in_min_alt.value())
         max_alt = float(self.in_max_alt.value())
         if max_alt <= min_alt:
             QMessageBox.warning(self, "Settings", "Max altitude must be greater than min altitude.")
             return
+
         self.btn_plan.setEnabled(False)
         self.statusBar().showMessage("Planning observations…")
+
         worker = PlanWorker(self.plan, min_alt, max_alt)
         self._plan_workers.add(worker)
+
         worker.finished.connect(self.on_plan_finished)
         worker.failed.connect(self.on_plan_failed)
 
@@ -1811,14 +2068,19 @@ class MainWindow(QMainWindow):
         self.plan = updated_plan
         self._last_coords = coords
         self._last_names = names
+
         self.tbl.setRowCount(0)
         for row in self.plan:
             self._append_table_row(row)
+
         if altitude_fig is not None:
             self._set_altitude_fig(altitude_fig)
+
         if self.tbl.rowCount() > 0:
             self.tbl.selectRow(0)
+
         self.statusBar().showMessage("Planning complete.")
+
     # -------------------------
     # Finder charts
     # -------------------------
@@ -1833,16 +2095,22 @@ class MainWindow(QMainWindow):
         r = idxs[0].row()
         if r < 0 or r >= len(self.plan):
             return
+
         row = self.plan[r]
         self._selected_row = row
+
         fov1 = int(self.in_fov1.value())
         fov2 = int(self.in_fov2.value())
         mode = self.in_survey.currentText()
+
         self.statusBar().showMessage(f"Generating finder charts for {row.name}…")
+
         self._finder_request_id += 1
         req_id = self._finder_request_id
+
         worker = FinderWorker(req_id, row.name, row.ra, row.dec, fov1, fov2, mode)
         self._finder_workers.add(worker)
+
         worker.finished.connect(self.on_finder_finished)
         worker.failed.connect(self.on_finder_failed)
 
@@ -1864,12 +2132,15 @@ class MainWindow(QMainWindow):
         if request_id != self._finder_request_id:
             return
         self._set_finder_figs(fig1, fig2)
+
         if self._open_finder_dialog_request is not None:
             dlg = self._open_finder_dialog_request
             if isinstance(dlg, FinderInspectorDialog):
                 dlg.set_figure(fig1 if dlg.which_fov == 1 else fig2)
             self._open_finder_dialog_request = None
+
         self.statusBar().showMessage("Finder charts updated.")
+
     # -------------------------
     # Click bindings
     # -------------------------
@@ -1877,10 +2148,12 @@ class MainWindow(QMainWindow):
         def _on_click(event):
             if not self._last_coords or not self._last_names:
                 return
+
             if self._alt_dialog is not None and self._alt_dialog.isVisible():
                 self._alt_dialog.raise_()
                 self._alt_dialog.activateWindow()
                 return
+
             dlg = AltitudeInspectorDialog(
                 self,
                 self._last_coords,
@@ -1890,9 +2163,11 @@ class MainWindow(QMainWindow):
             )
             self._alt_dialog = dlg
             dlg.finished.connect(lambda _: setattr(self, "_alt_dialog", None))
+
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
+
         self.alt_canvas.mpl_connect("button_press_event", _on_click)
 
     def _bind_finder_clicks(self):
@@ -1902,6 +2177,7 @@ class MainWindow(QMainWindow):
                 existing.raise_()
                 existing.activateWindow()
                 return
+
             fig = None
             try:
                 if self._selected_row is not None:
@@ -1912,20 +2188,26 @@ class MainWindow(QMainWindow):
                     fig = core.finder_figure(rt.coord, rt.display_name, fov_arcmin=fov, mode=mode)
             except Exception:
                 fig = None
+
             if fig is None:
                 fig = core.plt.figure(figsize=(7.8, 6.3))
+
             dlg = FinderInspectorDialog(self, fig, which_fov)
+
             if which_fov == 1:
                 self._finder_dialog_fov1 = dlg
                 dlg.finished.connect(lambda _: setattr(self, "_finder_dialog_fov1", None))
             else:
                 self._finder_dialog_fov2 = dlg
                 dlg.finished.connect(lambda _: setattr(self, "_finder_dialog_fov2", None))
+
             dlg.show()
             dlg.raise_()
             dlg.activateWindow()
+
         self.finder_canvas_1.mpl_connect("button_press_event", lambda e: _open(1))
         self.finder_canvas_2.mpl_connect("button_press_event", lambda e: _open(2))
+
     # -------------------------
     # Clean shutdown
     # -------------------------
@@ -1935,6 +2217,7 @@ class MainWindow(QMainWindow):
                 w.requestInterruption()
                 w.wait(2000)
         event.accept()
+
     # -------------------------
     # Canvas replacement helpers
     # -------------------------
@@ -1960,6 +2243,7 @@ class MainWindow(QMainWindow):
             core.plt.close(self.finder_canvas_2.figure)
         except Exception:
             pass
+
         self.finder_tabs.clear()
         self.finder_canvas_1.setParent(None)
         self.finder_canvas_2.setParent(None)
@@ -1968,12 +2252,14 @@ class MainWindow(QMainWindow):
         self.finder_tabs.addTab(self.finder_canvas_1, "FOV1")
         self.finder_tabs.addTab(self.finder_canvas_2, "FOV2")
         self._bind_finder_clicks()
+
     # -------------------------
     # Table helper
     # -------------------------
     def _append_table_row(self, row: PlanRow):
         r = self.tbl.rowCount()
         self.tbl.insertRow(r)
+
         vals = [
             row.name,
             row.ra,
@@ -1984,6 +2270,7 @@ class MainWindow(QMainWindow):
             row.close_time,
             row.notes if (row.notes and row.notes.strip()) else "",
         ]
+
         for c, v in enumerate(vals):
             it = QTableWidgetItem(v)
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
@@ -1994,6 +2281,7 @@ class MainWindow(QMainWindow):
                     it.setToolTip(txt)
 
             self.tbl.setItem(r, c, it)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
