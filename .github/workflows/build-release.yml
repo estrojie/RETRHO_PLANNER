@@ -25,36 +25,47 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Build
       - name: Build with PyInstaller
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed --name RHOPlanner main.py ^
-            --additional-hooks-dir hooks ^
-            --collect-data astroquery --copy-metadata astroquery ^
-            --collect-data astropy    --copy-metadata astropy ^
-            --collect-data astroplan  --copy-metadata astroplan ^
-            --collect-data matplotlib --copy-metadata matplotlib
+          pyinstaller --noconfirm --clean --onedir --windowed --name RHOPlanner main.py --additional-hooks-dir hooks --collect-data astroquery --copy-metadata astroquery --collect-data astropy --copy-metadata astropy --collect-data astroplan --copy-metadata astroplan --collect-data matplotlib --copy-metadata matplotlib
 
+      # Package artifacts
       - name: Package (Windows zip)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          powershell -Command "Compress-Archive -Path dist/RHOPlanner -DestinationPath RHOPlanner_windows.zip -Force"
+          Compress-Archive -Path "dist/RHOPlanner" -DestinationPath "RHOPlanner_windows.zip" -Force
 
       - name: Package (macOS zip)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
-          ditto -c -k --sequesterRsrc --keepParent dist/RHOPlanner.app RHOPlanner_macos.zip
+          # PyInstaller output on macOS can be either dist/RHOPlanner.app OR dist/RHOPlanner/RHOPlanner.app.
+          if [ -d "dist/RHOPlanner.app" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "dist/RHOPlanner.app" "RHOPlanner_macos.zip"
+          elif [ -d "dist/RHOPlanner/RHOPlanner.app" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "dist/RHOPlanner/RHOPlanner.app" "RHOPlanner_macos.zip"
+          else
+            echo "Could not find RHOPlanner.app in dist/"
+            ls -la dist
+            exit 1
+          fi
 
       - name: Package (Linux tar.gz)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           tar -czf RHOPlanner_linux.tar.gz -C dist RHOPlanner
 
+      # Upload to the GitHub Release created by the tag
       - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
