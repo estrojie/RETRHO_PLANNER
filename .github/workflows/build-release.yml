@@ -31,25 +31,45 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build with PyInstaller
+      # ---------- BUILD ----------
+      - name: Build with PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed --name RHOPlanner main.py
+          pyinstaller --noconfirm --clean --onedir --windowed --name RHOPlanner `
+            --additional-hooks-dir hooks `
+            --collect-all astroquery `
+            main.py
 
+      - name: Build with PyInstaller (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed --name RHOPlanner \
+            --additional-hooks-dir hooks \
+            --collect-all astroquery \
+            main.py
+
+      # ---------- PACKAGE ----------
       - name: Package (Windows zip)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          powershell -Command "Compress-Archive -Path dist/RHOPlanner -DestinationPath RHOPlanner_windows.zip -Force"
+          Compress-Archive -Path dist/RHOPlanner -DestinationPath RHOPlanner_windows.zip -Force
 
       - name: Package (macOS zip)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           ditto -c -k --sequesterRsrc --keepParent dist/RHOPlanner.app RHOPlanner_macos.zip
 
       - name: Package (Linux tar.gz)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           tar -czf RHOPlanner_linux.tar.gz -C dist RHOPlanner
 
+      # ---------- RELEASE UPLOAD ----------
       - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
