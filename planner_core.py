@@ -1,15 +1,10 @@
-# =========================
-# planner_core.py  (UPDATED)
-# =========================
+# planner_core.py
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Any
 from datetime import datetime, date, timezone, timedelta
 from zoneinfo import ZoneInfo
 import re
-
-# ---- SkyView compatibility patch (astroplan may pass grid=; astroquery 0.4.11 doesn't support it)
 from astroquery.skyview import SkyView
 import inspect
 
@@ -27,22 +22,17 @@ import pandas as pd
 import requests
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-
 import astropy.units as u
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.utils import iers
 from astropy.visualization import ZScaleInterval
 from astropy.wcs import WCS
-
 from astroplan import Observer, FixedTarget
 from astroplan.plots import plot_finder_image
 from astroquery.simbad import Simbad
 
-
-# ----------------------------
 # Defaults (RHO)
-# ----------------------------
 DEFAULT_LAT = 29.400041
 DEFAULT_LON = -82.585953
 DEFAULT_HEIGHT_M = 31
@@ -65,10 +55,7 @@ NWS_HEADERS = {
 # For notes / UI warnings
 DEC_WARNING_LIMIT_DEG = 60.0
 
-
-# ----------------------------
 # Runtime state (editable from UI)
-# ----------------------------
 @dataclass
 class SiteConfig:
     lat: float = DEFAULT_LAT
@@ -77,11 +64,9 @@ class SiteConfig:
     timezone: str = DEFAULT_TZ
     name: str = DEFAULT_SITE_NAME
 
-
 _CURRENT_SITE = SiteConfig()
 _CURRENT_OBSERVER: Observer | None = None
 _PLANNING_DATE: date = date.today()
-
 
 def set_site(lat: float, lon: float, height_m: float, timezone_str: str, name: str | None = None) -> None:
     global _CURRENT_SITE, _CURRENT_OBSERVER
@@ -94,15 +79,12 @@ def set_site(lat: float, lon: float, height_m: float, timezone_str: str, name: s
     )
     _CURRENT_OBSERVER = None
 
-
 def set_planning_date(d: date) -> None:
     global _PLANNING_DATE
     _PLANNING_DATE = d
 
-
 def get_planning_date() -> date:
     return _PLANNING_DATE
-
 
 def get_observer() -> Observer:
     global _CURRENT_OBSERVER
@@ -116,17 +98,12 @@ def get_observer() -> Observer:
         _CURRENT_OBSERVER = Observer(location=loc, timezone=_CURRENT_SITE.timezone, name=_CURRENT_SITE.name)
     return _CURRENT_OBSERVER
 
-
 def get_site_config() -> SiteConfig:
     return _CURRENT_SITE
 
-
-# ----------------------------
 # SIMBAD
-# ----------------------------
 custom_simbad = Simbad()
 custom_simbad.add_votable_fields("flux(V)")
-
 
 @dataclass
 class ResolvedTarget:
@@ -135,10 +112,7 @@ class ResolvedTarget:
     vmag: Any
     method: str
 
-
-# ----------------------------
 # weather.gov validTime parsing
-# ----------------------------
 def _parse_iso_duration_to_seconds(dur: str) -> int:
     m = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", dur)
     if not m:
@@ -147,7 +121,6 @@ def _parse_iso_duration_to_seconds(dur: str) -> int:
     mi = int(m.group(2) or 0)
     s = int(m.group(3) or 0)
     return h * 3600 + mi * 60 + s
-
 
 def _parse_valid_time(valid_time: str):
     try:
@@ -158,7 +131,6 @@ def _parse_valid_time(valid_time: str):
         return start, end
     except Exception:
         return None, None
-
 
 def get_cloud_cover_now_next(lat: float, lon: float, timeout_s: float = 6.0) -> Dict[str, Any]:
     out: Dict[str, Any] = {
@@ -238,17 +210,13 @@ def get_cloud_cover_now_next(lat: float, lon: float, timeout_s: float = 6.0) -> 
     except Exception:
         return out
 
-
-# ----------------------------
-# Robust RA/Dec parsing
-# ----------------------------
+# RA/Dec parsing
 def _is_number(s: str) -> bool:
     try:
         float(s)
         return True
     except Exception:
         return False
-
 
 def parse_radec(ra: str, dec: str) -> SkyCoord:
     ra = (ra or "").strip().replace(" ", ":")
@@ -264,10 +232,7 @@ def parse_radec(ra: str, dec: str) -> SkyCoord:
 
     return SkyCoord(ra, dec, unit=(ra_unit, u.deg), frame="icrs")
 
-
-# ----------------------------
 # Resolve target (SIMBAD -> fallback)
-# ----------------------------
 def resolve_target(name: str, ra: str, dec: str) -> ResolvedTarget:
     name = (name or "").strip()
     ra = (ra or "").strip()
@@ -291,10 +256,7 @@ def resolve_target(name: str, ra: str, dec: str) -> ResolvedTarget:
     disp = name if name else "Unnamed Target"
     return ResolvedTarget(display_name=disp, coord=coord, vmag="N/A", method="Manual RA/Dec")
 
-
-# ----------------------------
 # Planning time grid for a chosen local date
-# ----------------------------
 def planning_window_times(step_min: int = 2) -> Time:
     obs = get_observer()
     tz = ZoneInfo(get_site_config().timezone)
@@ -308,7 +270,6 @@ def planning_window_times(step_min: int = 2) -> Time:
 
     n = int(np.floor(((end - start).to(u.min).value) / step_min))
     return start + np.arange(0, n + 1) * step_min * u.min
-
 
 def compute_visibility_window(
     coord: SkyCoord,
@@ -328,10 +289,7 @@ def compute_visibility_window(
     t2 = pd.Timestamp(times[idx[-1]].to_datetime(timezone=obs.timezone))
     return t1, t2
 
-
-# ----------------------------
 # Sky conditions panel
-# ----------------------------
 def sky_conditions(timeout_s: float = 6.0) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     obs = get_observer()
@@ -364,10 +322,7 @@ def sky_conditions(timeout_s: float = 6.0) -> Dict[str, Any]:
 
     return out
 
-
-# ----------------------------
 # Twilight spans helper
-# ----------------------------
 def _mask_to_spans(dt_list, mask: np.ndarray):
     spans = []
     mask = np.asarray(mask, dtype=bool)
@@ -383,10 +338,7 @@ def _mask_to_spans(dt_list, mask: np.ndarray):
         i = j + 1
     return spans
 
-
-# ----------------------------
 # Altitude/Airmass plot
-# ----------------------------
 def plot_altitudes(
     coords: List[SkyCoord],
     names: List[str],
@@ -394,12 +346,12 @@ def plot_altitudes(
     max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
     y_mode: str = "altitude",
     only_names: Optional[List[str]] = None,
-    display_tz: str = "local",   # <-- ADD
+    display_tz: str = "local",  
 ) -> plt.Figure:
     obs = get_observer()
     times = planning_window_times(step_min=2)
 
-    # ----- choose display timezone -----
+    # choose display timezone
     if str(display_tz).lower() in ("utc", "z"):
         tz_disp = timezone.utc
         xlab = "UTC"
@@ -481,10 +433,7 @@ def plot_altitudes(
     plt.close(fig)
     return fig
 
-
-# ----------------------------
 # Finder charts
-# ----------------------------
 def finder_figure_astroplan(coord: SkyCoord, name: str, fov_arcmin: int, survey: str) -> plt.Figure:
     fixed = FixedTarget(coord=coord, name=name)
     fig, ax = plt.subplots(figsize=(7.8, 6.4))
@@ -504,7 +453,6 @@ def finder_figure_astroplan(coord: SkyCoord, name: str, fov_arcmin: int, survey:
     plt.close(fig)
     return fig
 
-
 def _get_skyview_hdu(coord: SkyCoord, fov_arcmin: int, pixels: int, surveys: List[str]):
     for survey in surveys:
         try:
@@ -520,7 +468,6 @@ def _get_skyview_hdu(coord: SkyCoord, fov_arcmin: int, pixels: int, surveys: Lis
         except Exception:
             continue
     return None, None
-
 
 def finder_figure_skyview(coord: SkyCoord, name: str, fov_arcmin: int, pixels: int = 700) -> plt.Figure:
     used, hdu = _get_skyview_hdu(coord, fov_arcmin, pixels, SKYVIEW_SURVEYS)
@@ -571,7 +518,6 @@ def finder_figure_skyview(coord: SkyCoord, name: str, fov_arcmin: int, pixels: i
     plt.close(fig)
     return fig
 
-
 def finder_figure(coord: SkyCoord, name: str, fov_arcmin: int, mode: str) -> plt.Figure:
     if mode == "SkyView":
         return finder_figure_skyview(coord, name, fov_arcmin, pixels=700)
@@ -579,10 +525,7 @@ def finder_figure(coord: SkyCoord, name: str, fov_arcmin: int, mode: str) -> plt
         return finder_figure_astroplan(coord, name, fov_arcmin, survey="DSS2 Red")
     return finder_figure_astroplan(coord, name, fov_arcmin, survey="DSS")
 
-
-# ----------------------------
 # Upload parsing
-# ----------------------------
 def _norm_col(s: str) -> str:
     s = (s or "")
     s = s.replace("\n", " ").strip().lower()
@@ -590,14 +533,12 @@ def _norm_col(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-
 def find_col(df: pd.DataFrame, candidates: List[str]) -> str:
     cand_norm = {_norm_col(c) for c in candidates}
     for col in df.columns:
         if _norm_col(str(col)) in cand_norm:
             return col
     raise KeyError(f"No matching column found among: {candidates}")
-
 
 def _drop_template_first_data_row(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -636,7 +577,6 @@ def _drop_template_first_data_row(df: pd.DataFrame) -> pd.DataFrame:
         pass
 
     return df
-
 
 def load_targets_from_file(path: str) -> pd.DataFrame:
     if path.lower().endswith(".csv"):
