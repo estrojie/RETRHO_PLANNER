@@ -1,32 +1,22 @@
 # main.py
 from __future__ import annotations
-
 import sys
 from dataclasses import dataclass
 from typing import List
 from datetime import date
 from zoneinfo import ZoneInfo
-
 import numpy as np
 import pandas as pd
-
-# ---------------------------
 # Matplotlib setup
-# ---------------------------
 import matplotlib
-matplotlib.use("QtAgg")  # required for embedded Qt canvas
-
+matplotlib.use("QtAgg") 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg as FigureCanvas,
     NavigationToolbar2QT as NavigationToolbar,
 )
 from matplotlib.patches import Rectangle
-
-
-# ---------------------------
 # PySide6
-# ---------------------------
 from PySide6.QtCore import Qt, QThread, Signal, QDate, QSize, QTimer
 from PySide6.QtGui import QTextDocument, QFont
 from PySide6.QtWidgets import (
@@ -37,28 +27,16 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QCheckBox, QSizePolicy, QHeaderView,
     QStyle,
 )
-
-
-# ---------------------------
 # Astropy / Astroquery
-# ---------------------------
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.wcs.utils import pixel_to_skycoord
-
 import warnings
 from astroquery.exceptions import NoResultsWarning
-
-
-# ---------------------------
 # Local modules
-# ---------------------------
 import planner_core as core
 
-
-# =============================================================================
-# Qt6/PySide6 standard icon helper (fixes SP_* AttributeError)
-# =============================================================================
+# Qt6/PySide6 standard icon helper
 def std_icon(widget: QWidget, enum_name: str):
     """
     Return a standard icon in a PySide6/Qt6 compatible way.
@@ -72,13 +50,9 @@ def std_icon(widget: QWidget, enum_name: str):
     return widget.style().standardIcon(sp)
 
 
-# =============================================================================
 # App styling (Theme / QSS)
-# =============================================================================
 def apply_app_style(app: QApplication):
-    # Consistent UI font (Windows friendly)
     app.setFont(QFont("Segoe UI", 10))
-
     app.setStyleSheet("""
     QMainWindow {
         background-color: qlineargradient(
@@ -87,9 +61,7 @@ def apply_app_style(app: QApplication):
             stop:1 #181a1f
         );
     }
-
     QLabel { color: #d7d7d7; }
-
     QGroupBox {
         border: 1px solid #3a3d45;
         border-radius: 8px;
@@ -105,7 +77,6 @@ def apply_app_style(app: QApplication):
         padding: 0 6px 0 6px;
         color: #cfcfcf;
     }
-
     QLineEdit, QSpinBox, QDoubleSpinBox, QDateEdit, QComboBox {
         background-color: #14161b;
         border: 1px solid #3a3d45;
@@ -117,7 +88,6 @@ def apply_app_style(app: QApplication):
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus, QComboBox:focus {
         border: 1px solid #4a90e2;
     }
-
     QPushButton {
         background-color: #2a2d33;
         border: 1px solid #3a3d45;
@@ -156,7 +126,6 @@ def apply_app_style(app: QApplication):
         background: #1b1d23;
         color: #ffffff;
     }
-
     QTableWidget {
         background-color: rgba(18,20,25,0.55);
         border: 1px solid #3a3d45;
@@ -173,7 +142,6 @@ def apply_app_style(app: QApplication):
         color: #dcdcdc;
         font-weight: 600;
     }
-
     QStatusBar {
         background-color: rgba(18,20,25,0.65);
         border-top: 1px solid #3a3d45;
@@ -181,10 +149,7 @@ def apply_app_style(app: QApplication):
     }
     """)
 
-
-# =============================================================================
 # Data model
-# =============================================================================
 @dataclass
 class PlanRow:
     name: str
@@ -194,14 +159,11 @@ class PlanRow:
     vmag: str = "N/A"
     open_time: str = "—"
     close_time: str = "—"
-    notes: str = ""  # empty by default (tooltip used when not empty)
+    notes: str = "" 
 
-
-# =============================================================================
 # Workers
-# =============================================================================
 class PlanWorker(QThread):
-    finished = Signal(list, object, list, list)  # updated_plan, altitude_fig, coords, names
+    finished = Signal(list, object, list, list) 
     failed = Signal(str)
 
     def __init__(self, plan: List[PlanRow], min_alt: float, max_alt: float):
@@ -217,7 +179,6 @@ class PlanWorker(QThread):
             names = []
 
             for row in self.plan:
-                # --- Resolve (robustly) ---
                 try:
                     rt = core.resolve_target(row.name, row.ra, row.dec)
                     resolved_ok = True
@@ -238,7 +199,7 @@ class PlanWorker(QThread):
                     updated.append(updated_row)
                     continue
 
-                # Notes rules:
+                # Notes rules
                 note = ""
                 try:
                     if rt.coord.dec.deg > core.DEC_WARNING_LIMIT_DEG:
@@ -246,7 +207,7 @@ class PlanWorker(QThread):
                 except Exception:
                     pass
 
-                # --- Visibility window ---
+                # Visibility window 
                 try:
                     t1, t2 = core.compute_visibility_window(rt.coord, self.min_alt, self.max_alt)
                 except Exception:
@@ -255,7 +216,7 @@ class PlanWorker(QThread):
                 open_s = t1.strftime("%H:%M") if t1 is not None else "—"
                 close_s = t2.strftime("%H:%M") if t2 is not None else "—"
 
-                # --- Vmag preference ---
+                # Vmag preference
                 preferred_vmag = row.vmag
                 if str(preferred_vmag).strip().lower() in ("", "n/a", "na", "nan", "none", "—", "-"):
                     preferred_vmag = rt.vmag
@@ -318,7 +279,7 @@ from astroquery.simbad import Simbad
 
 
 class StarIdWorker(QThread):
-    finished = Signal(object)   # dict result
+    finished = Signal(object)  
     failed = Signal(str)
 
     def __init__(self, coord_candidates: list[SkyCoord], radius_arcsec: float = 120.0):
@@ -326,7 +287,6 @@ class StarIdWorker(QThread):
         self.cands = list(coord_candidates)
         self.radius_arcsec = float(radius_arcsec)
 
-        # Dedicated SIMBAD client for this worker (avoids shared/global state)
         self.simbad = Simbad()
         self.simbad.add_votable_fields("main_id", "ra", "dec", "flux(V)")
 
@@ -447,10 +407,7 @@ class StarIdWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
-
-# =============================================================================
 # Altitude inspector
-# =============================================================================
 class AltitudeInspectorDialog(QDialog):
     def __init__(self, parent, coords, names, min_alt, max_alt):
         super().__init__(parent)
@@ -539,10 +496,7 @@ class AltitudeInspectorDialog(QDialog):
         )
         self._replace_plot(fig)
 
-
-# =============================================================================
 # Finder inspector
-# =============================================================================
 class FinderInspectorDialog(QDialog):
     @staticmethod
     def _fmt_vmag(v) -> str | None:
@@ -592,15 +546,10 @@ class FinderInspectorDialog(QDialog):
                 pass
 
     def _rebuild_numbering(self):
-        """
-        Re-number remaining marker labels + list text in order.
-        Assumes each list item meta has 'num_text' (the number bubble Text artist).
-        """
         n = 0
         for i in range(self.list_ident.count()):
             it = self.list_ident.item(i)
             meta = it.data(Qt.UserRole) or {}
-            # Only renumber items that were created by markers
             if not meta.get("is_marker", False):
                 continue
 
@@ -611,10 +560,8 @@ class FinderInspectorDialog(QDialog):
                     num_text.set_text(str(n))
                 except Exception:
                     pass
-
-            # Update the visible text in the list: replace leading "X. " with new number
             txt = it.text()
-            # Remove an existing "N. " prefix if present
+
             import re
             txt2 = re.sub(r"^\s*\d+\.\s*", "", txt)
             it.setText(f"{n}. {txt2}")
@@ -676,8 +623,8 @@ class FinderInspectorDialog(QDialog):
         self._label_counter = 0
         self._pending_ident_item = None
         self._pending_ident_num = None
-        self._pending_ident_xy = None  # (ax, x, y)
-        self._marker_labels = []   # matplotlib text artists for "1,2,3..."
+        self._pending_ident_xy = None  
+        self._marker_labels = []   
         self._free_line = None
         self._free_xs = []
         self._free_ys = []
@@ -1144,13 +1091,11 @@ class FinderInspectorDialog(QDialog):
 
         created_artists = []
 
-        # increment numbering only if it's going into the list
         marker_num = None
         if add_to_list:
             self._label_counter += 1
             marker_num = self._label_counter
 
-        # point marker
         p = ax.plot(
             [x], [y],
             marker="o",
@@ -1160,14 +1105,12 @@ class FinderInspectorDialog(QDialog):
         self._ann_artists.append(p)
         created_artists.append(p)
 
-        # optional label next to marker (Guide, etc.)
         label_artist = None
         if label:
             label_artist = ax.text(x, y, f" {label}", fontsize=10)
             self._ann_texts.append(label_artist)
             created_artists.append(label_artist)
 
-        # numbered bubble on plot
         num_artist = None
         if marker_num is not None:
             num_artist = ax.text(
@@ -1188,24 +1131,19 @@ class FinderInspectorDialog(QDialog):
             list_txt = f"{marker_num}. {base_txt}" if marker_num is not None else base_txt
 
             it = self._add_list_item(list_txt, meta={})
-            # Store strong links between list item and plot artists
             it_meta = {
                 "is_marker": True,
-                "artists": created_artists,      # point + label + number
-                "num_text": num_artist,          # the number bubble Text
-                "raw_meta": meta or {},          # SIMBAD payload etc.
+                "artists": created_artists,     
+                "num_text": num_artist,         
+                "raw_meta": meta or {},         
             }
             it.setData(Qt.UserRole, it_meta)
             it.setToolTip(list_txt)
             it.setSizeHint(self._sizehint_for_text(list_txt))
-
-        # increment numbering only if it's going into the list
         marker_num = None
         if add_to_list:
             self._label_counter += 1
             marker_num = self._label_counter
-
-        # point marker
         p = ax.plot(
             [x], [y],
             marker="o",
@@ -1214,12 +1152,10 @@ class FinderInspectorDialog(QDialog):
         )[0]
         self._ann_artists.append(p)
 
-        # optional small text label like "Guide", "P1", etc.
         if label:
             t = ax.text(x, y, f" {label}", fontsize=10)
             self._ann_texts.append(t)
 
-        # numbered label rendered on the image (this is what you lost)
         if marker_num is not None:
             tn = ax.text(
                 x, y,
@@ -1233,7 +1169,6 @@ class FinderInspectorDialog(QDialog):
 
         self.canvas.draw_idle()
 
-        # list entry
         if add_to_list:
             base_txt = str(label) if label else "Marker"
             if marker_num is not None:
@@ -1346,11 +1281,9 @@ class FinderInspectorDialog(QDialog):
                 self._remove_artists(meta.get("artists", []))
             self.list_ident.takeItem(self.list_ident.row(it))
 
-        # Re-number what remains
         self._rebuild_numbering()
 
     def _clear_list(self):
-        # Remove all marker artists associated with the list
         for i in range(self.list_ident.count()):
             it = self.list_ident.item(i)
             meta = it.data(Qt.UserRole) or {}
@@ -1359,7 +1292,6 @@ class FinderInspectorDialog(QDialog):
 
         self.list_ident.clear()
 
-        # Reset counters and internal references
         self._label_counter = 0
         self._marker_labels.clear()
         self._ann_artists.clear()
@@ -1372,8 +1304,6 @@ class FinderInspectorDialog(QDialog):
         if not cands:
             QMessageBox.information(self, "Identify", "Could not interpret click coordinates (no WCS?).")
             return
-
-        # ---- Create ONE pending list entry up front (no marker yet) ----
         self._label_counter += 1
         num = self._label_counter
 
@@ -1427,7 +1357,7 @@ class FinderInspectorDialog(QDialog):
             m["raw_meta"] = meta_payload or {}
             it0.setData(Qt.UserRole, m)
 
-            # Update list text (keep the "N. " prefix)
+            # Update list text
             full_text = f"{num0}. {text_block}"
             it0.setText(full_text)
             it0.setToolTip(full_text)
@@ -1442,7 +1372,7 @@ class FinderInspectorDialog(QDialog):
 
         def _ok(res):
             if not res.get("ok", False):
-                # Build a useful "no match" display
+                # Build "no match" display
                 try:
                     c0 = cands[0]
                     ra_s = c0.ra.to_string(unit=u.hour, sep=":", precision=2)
@@ -1510,10 +1440,7 @@ class FinderInspectorDialog(QDialog):
         self.parent_window._open_finder_dialog_request = self
         self.parent_window.on_row_selected()
 
-
-# =============================================================================
 # Main window
-# =============================================================================
 class MainWindow(QMainWindow):
     def reset_defaults(self):
         # Restore default date/location/timezone
@@ -1524,7 +1451,7 @@ class MainWindow(QMainWindow):
         self.height_spin.setValue(float(self._default_site.height_m))
         self.tz_combo.setCurrentText(str(self._default_site.timezone))
 
-        # Restore Planning Settings defaults too (since user asked "everything")
+        # Restore Planning Settings defaults
         self.in_min_alt.setValue(self._default_min_alt)
         self.in_max_alt.setValue(self._default_max_alt)
         self.in_fov1.setValue(self._default_fov1)
@@ -1567,9 +1494,7 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter)
 
-        # -------------------------
         # Left panel
-        # -------------------------
         left = QWidget()
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(6, 6, 6, 6)
@@ -1586,7 +1511,7 @@ class MainWindow(QMainWindow):
         self.date_edit.setDate(today)
 
         site = core.get_site_config()
-        # --- Defaults snapshot (used by "Reset Defaults") ---
+        # Defaults snapshot 
         self._default_site = site
         self._default_plan_date = QDate.currentDate()
         self._default_min_alt = int(core.DEFAULT_MIN_ALT_DEG)
@@ -1613,7 +1538,7 @@ class MainWindow(QMainWindow):
         self.tz_combo = QComboBox()
         self.tz_combo.setEditable(True)
 
-        # Common timezones (include yours + a few useful ones)
+        # Common timezones
         tz_list = [
             "US/Eastern", "US/Central", "US/Mountain", "US/Pacific",
             "UTC",
@@ -1703,9 +1628,7 @@ class MainWindow(QMainWindow):
         left_l.addWidget(settings_box)
         left_l.addStretch(1)
 
-        # -------------------------
         # Center panel
-        # -------------------------
         center = QWidget()
         center_l = QVBoxLayout(center)
         center_l.setContentsMargins(6, 6, 6, 6)
@@ -1773,9 +1696,7 @@ class MainWindow(QMainWindow):
         center_l.addWidget(self.tbl, 1)
         center_l.addWidget(btn_bar)
 
-        # -------------------------
         # Right panel
-        # -------------------------
         right = QWidget()
         right_l = QVBoxLayout(right)
         right_l.setContentsMargins(6, 6, 6, 6)
@@ -1834,9 +1755,7 @@ class MainWindow(QMainWindow):
 
         self.apply_date_location(initial=True)
 
-    # -------------------------
     # Apply date/location
-    # -------------------------
     def apply_date_location(self, initial: bool = False):
         try:
             self.statusBar().showMessage("Applying site/date…")
@@ -1866,9 +1785,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Apply failed.")
             QMessageBox.critical(self, "Apply failed", str(e))
 
-    # -------------------------
     # Tabs
-    # -------------------------
     def _build_manual_tab(self) -> QWidget:
         w = QWidget()
         l = QVBoxLayout(w)
@@ -1916,9 +1833,7 @@ class MainWindow(QMainWindow):
         l.addStretch(1)
         return w
 
-    # -------------------------
     # Sky
-    # -------------------------
     def refresh_sky(self):
         self.statusBar().showMessage("Refreshing sky conditions…")
         cond = core.sky_conditions()
@@ -1940,9 +1855,7 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Ready")
 
-    # -------------------------
     # Plan manipulation
-    # -------------------------
     def add_manual(self):
         try:
             name = self.in_name.text().strip()
@@ -2028,9 +1941,7 @@ class MainWindow(QMainWindow):
         self.tbl.selectRow(new_r)
         self.on_row_selected()
 
-    # -------------------------
     # Planning
-    # -------------------------
     def plan_observations(self):
         if not self.plan:
             QMessageBox.information(self, "No targets", "Add at least one target to the plan.")
@@ -2080,10 +1991,8 @@ class MainWindow(QMainWindow):
             self.tbl.selectRow(0)
 
         self.statusBar().showMessage("Planning complete.")
-
-    # -------------------------
+        
     # Finder charts
-    # -------------------------
     def refresh_finders_for_selected(self):
         if self.tbl.selectionModel().selectedRows():
             self.on_row_selected()
@@ -2141,9 +2050,7 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Finder charts updated.")
 
-    # -------------------------
     # Click bindings
-    # -------------------------
     def _bind_altitude_click(self):
         def _on_click(event):
             if not self._last_coords or not self._last_names:
@@ -2208,9 +2115,7 @@ class MainWindow(QMainWindow):
         self.finder_canvas_1.mpl_connect("button_press_event", lambda e: _open(1))
         self.finder_canvas_2.mpl_connect("button_press_event", lambda e: _open(2))
 
-    # -------------------------
     # Clean shutdown
-    # -------------------------
     def closeEvent(self, event):
         for w in list(self._finder_workers) + list(self._plan_workers):
             if w.isRunning():
@@ -2218,9 +2123,7 @@ class MainWindow(QMainWindow):
                 w.wait(2000)
         event.accept()
 
-    # -------------------------
     # Canvas replacement helpers
-    # -------------------------
     def _set_altitude_fig(self, fig):
         parent = self.alt_canvas.parentWidget()
         layout = parent.layout()
@@ -2253,9 +2156,7 @@ class MainWindow(QMainWindow):
         self.finder_tabs.addTab(self.finder_canvas_2, "FOV2")
         self._bind_finder_clicks()
 
-    # -------------------------
     # Table helper
-    # -------------------------
     def _append_table_row(self, row: PlanRow):
         r = self.tbl.rowCount()
         self.tbl.insertRow(r)
@@ -2288,4 +2189,5 @@ if __name__ == "__main__":
     apply_app_style(app)
     w = MainWindow()
     w.show()
+
     sys.exit(app.exec())
