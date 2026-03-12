@@ -271,23 +271,54 @@ def planning_window_times(step_min: int = 2) -> Time:
     n = int(np.floor(((end - start).to(u.min).value) / step_min))
     return start + np.arange(0, n + 1) * step_min * u.min
 
+def compute_visibility_windows(
+    coord: SkyCoord,
+    min_alt_deg: float = DEFAULT_MIN_ALT_DEG,
+    max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
+    step_min: int = 2,
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    obs = get_observer()
+    times = planning_window_times(step_min=step_min)
+    alt = obs.altaz(times, coord).alt.deg
+    mask = (alt >= min_alt_deg) & (alt <= max_alt_deg)
+
+    if not np.any(mask):
+        return []
+
+    idx = np.where(mask)[0]
+    groups = np.split(idx, np.where(np.diff(idx) != 1)[0] + 1)
+
+    windows: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    for g in groups:
+        if len(g) == 0:
+            continue
+        t1 = pd.Timestamp(times[g[0]].to_datetime(timezone=obs.timezone))
+        t2 = pd.Timestamp(times[g[-1]].to_datetime(timezone=obs.timezone))
+        windows.append((t1, t2))
+
+    return windows
+
+
 def compute_visibility_window(
     coord: SkyCoord,
     min_alt_deg: float = DEFAULT_MIN_ALT_DEG,
     max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
     step_min: int = 2,
 ) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    obs = get_observer()
-    times = planning_window_times(step_min=step_min)
-    alt = obs.altaz(times, coord).alt.deg
-    mask = (alt >= min_alt_deg) & (alt <= max_alt_deg)
-    if not np.any(mask):
+    windows = compute_visibility_windows(coord, min_alt_deg, max_alt_deg, step_min=step_min)
+    if not windows:
         return None, None
+    return windows[0][0], windows[-1][1]
 
-    idx = np.where(mask)[0]
-    t1 = pd.Timestamp(times[idx[0]].to_datetime(timezone=obs.timezone))
-    t2 = pd.Timestamp(times[idx[-1]].to_datetime(timezone=obs.timezone))
-    return t1, t2
+def format_visibility_windows(
+    windows: List[Tuple[pd.Timestamp, pd.Timestamp]],
+    time_fmt: str = "%H:%M",
+) -> str:
+    if not windows:
+        return "—"
+
+    parts = [f"{t1.strftime(time_fmt)}–{t2.strftime(time_fmt)}" for t1, t2 in windows]
+    return "; ".join(parts)
 
 # Sky conditions panel
 def sky_conditions(timeout_s: float = 6.0) -> Dict[str, Any]:
@@ -393,7 +424,13 @@ def plot_altitudes(
         am[good] = 1.0 / sin_alt[good]
         return am
 
-    for coord, nm in zip(coords, names):
+    # Limit number of targets in preview
+    MAX_PREVIEW_OBJECTS = 5
+
+    coords_plot = coords[:MAX_PREVIEW_OBJECTS]
+    names_plot = names[:MAX_PREVIEW_OBJECTS]
+
+    for coord, nm in zip(coords_plot, names_plot):
         alt = obs.altaz(times, coord).alt.deg
         if y_mode.lower().startswith("air"):
             y = alt_to_airmass(alt)
@@ -425,7 +462,13 @@ def plot_altitudes(
     ax.tick_params(colors="white")
     fig.autofmt_xdate(rotation=30)
 
-    leg = ax.legend(framealpha=0.75, fontsize=10)
+    leg = ax.legend(
+        framealpha=0.75,
+        fontsize=8,
+        ncol=1,
+        handlelength=1.5,
+        labelspacing=0.25,
+    )
     for t in leg.get_texts():
         t.set_color("white")
 
