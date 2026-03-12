@@ -17,7 +17,7 @@ from matplotlib.backends.backend_qtagg import (
 )
 from matplotlib.patches import Rectangle
 # PySide6
-from PySide6.QtCore import Qt, QThread, Signal, QDate, QSize, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QDate, QSize, QTimer, QSignalBlocker
 from PySide6.QtGui import QTextDocument, QFont
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -157,9 +157,8 @@ class PlanRow:
     dec: str
     priority: int = 3
     vmag: str = "N/A"
-    open_time: str = "—"
-    close_time: str = "—"
-    notes: str = "" 
+    visible_windows: str = "—"
+    notes: str = ""
 
 # Workers
 class PlanWorker(QThread):
@@ -192,8 +191,7 @@ class PlanWorker(QThread):
                         dec=row.dec or "—",
                         priority=row.priority,
                         vmag="N/A",
-                        open_time="—",
-                        close_time="—",
+                        visible_windows="—",
                         notes="Failed to Resolve (Check Name or Coordinates)",
                     )
                     updated.append(updated_row)
@@ -209,12 +207,11 @@ class PlanWorker(QThread):
 
                 # Visibility window 
                 try:
-                    t1, t2 = core.compute_visibility_window(rt.coord, self.min_alt, self.max_alt)
+                    windows = core.compute_visibility_windows(rt.coord, self.min_alt, self.max_alt)
+                    windows_s = core.format_visibility_windows(windows)
                 except Exception:
-                    t1, t2 = None, None
-
-                open_s = t1.strftime("%H:%M") if t1 is not None else "—"
-                close_s = t2.strftime("%H:%M") if t2 is not None else "—"
+                    windows = []
+                    windows_s = "—"
 
                 # Vmag preference
                 preferred_vmag = row.vmag
@@ -236,8 +233,7 @@ class PlanWorker(QThread):
                     dec=rt.coord.dec.to_string(unit=core.u.deg, sep=":", precision=2, alwayssign=True),
                     priority=row.priority,
                     vmag=vmag_s,
-                    open_time=open_s,
-                    close_time=close_s,
+                    visible_windows=windows_s,
                     notes=note,
                 )
                 updated.append(updated_row)
@@ -407,7 +403,6 @@ class StarIdWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
-# Altitude inspector
 class AltitudeInspectorDialog(QDialog):
     def __init__(self, parent, coords, names, min_alt, max_alt):
         super().__init__(parent)
@@ -418,6 +413,9 @@ class AltitudeInspectorDialog(QDialog):
         self.names = list(names)
         self.min_alt = float(min_alt)
         self.max_alt = float(max_alt)
+
+        self.max_selected_objects = 5
+        self._updating_selection = False
 
         root = QHBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -430,20 +428,39 @@ class AltitudeInspectorDialog(QDialog):
 
         self.chk_airmass = QCheckBox("Show Airmass (instead of Altitude)")
         self.chk_airmass.stateChanged.connect(self._replot)
+
         self.chk_utc = QCheckBox("Show UTC (instead of local time)")
         self.chk_utc.stateChanged.connect(self._replot)
 
         self.listw = QListWidget()
         self.listw.setSelectionMode(QAbstractItemView.MultiSelection)
-        for nm in self.names:
+
+        for i, nm in enumerate(self.names):
             it = QListWidgetItem(nm)
-            it.setSelected(True)
+            it.setSelected(i < self.max_selected_objects)
             self.listw.addItem(it)
-        self.listw.itemSelectionChanged.connect(self._replot)
+
+        self.listw.itemSelectionChanged.connect(self._on_selection_changed)
 
         cl.addWidget(self.chk_airmass)
         cl.addWidget(self.chk_utc)
-        cl.addWidget(QLabel("Objects to display:"))
+        cl.addWidget(QLabel("Objects to display (max 5):"))
+
+        sel_btns = QWidget()
+        sel_btns_l = QHBoxLayout(sel_btns)
+        sel_btns_l.setContentsMargins(0, 0, 0, 0)
+        sel_btns_l.setSpacing(8)
+
+        self.btn_select_first5 = QPushButton("Select First 5")
+        self.btn_select_first5.clicked.connect(self._select_first_five)
+
+        self.btn_unselect_all = QPushButton("Unselect All")
+        self.btn_unselect_all.clicked.connect(self._unselect_all)
+
+        sel_btns_l.addWidget(self.btn_select_first5)
+        sel_btns_l.addWidget(self.btn_unselect_all)
+
+        cl.addWidget(sel_btns)
         cl.addWidget(self.listw, 1)
 
         plotw = QWidget()
@@ -466,7 +483,11 @@ class AltitudeInspectorDialog(QDialog):
         self._replot()
 
     def _selected_names(self):
-        return [self.listw.item(i).text() for i in range(self.listw.count()) if self.listw.item(i).isSelected()]
+        return [
+            self.listw.item(i).text()
+            for i in range(self.listw.count())
+            if self.listw.item(i).isSelected()
+        ]
 
     def _replace_plot(self, fig):
         self.plot_layout.removeWidget(self.toolbar)
@@ -495,6 +516,60 @@ class AltitudeInspectorDialog(QDialog):
             display_tz=tz_mode,
         )
         self._replace_plot(fig)
+
+    def _on_selection_changed(self):
+        if self._updating_selection:
+            return
+        self._enforce_selection_limit()
+        self._replot()
+
+    def _select_first_five(self):
+        self._updating_selection = True
+        blocker = QSignalBlocker(self.listw)
+        try:
+            for i in range(self.listw.count()):
+                self.listw.item(i).setSelected(i < self.max_selected_objects)
+        finally:
+            del blocker
+            self._updating_selection = False
+        self._replot()
+
+    def _unselect_all(self):
+        self._updating_selection = True
+        blocker = QSignalBlocker(self.listw)
+        try:
+            for i in range(self.listw.count()):
+                self.listw.item(i).setSelected(False)
+        finally:
+            del blocker
+            self._updating_selection = False
+        self._replot()
+
+    def _enforce_selection_limit(self):
+        if self._updating_selection:
+            return
+
+        selected_items = [
+            self.listw.item(i)
+            for i in range(self.listw.count())
+            if self.listw.item(i).isSelected()
+        ]
+
+        if len(selected_items) <= self.max_selected_objects:
+            return
+
+        self._updating_selection = True
+        try:
+            for it in selected_items[self.max_selected_objects:]:
+                it.setSelected(False)
+        finally:
+            self._updating_selection = False
+
+        QMessageBox.information(
+            self,
+            "Selection limit",
+            f"You can display at most {self.max_selected_objects} objects at a time."
+        )
 
 # Finder inspector
 class FinderInspectorDialog(QDialog):
@@ -1638,10 +1713,10 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_manual_tab(), "Manual Entry")
         tabs.addTab(self._build_upload_tab(), "Upload Target List")
 
-        self.tbl = QTableWidget(0, 8)
-        self.tbl.setHorizontalHeaderLabels(["Name", "RA", "Dec", "Priority", "Vmag", "Open", "Close", "Notes"])
+        self.tbl = QTableWidget(0, 7)
+        self.tbl.setHorizontalHeaderLabels(["Name", "RA", "Dec", "Priority", "Vmag", "Visible Windows", "Notes"])
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.tbl.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tbl.itemSelectionChanged.connect(self.on_row_selected)
         self.tbl.setAlternatingRowColors(True)
 
@@ -1660,14 +1735,13 @@ class MainWindow(QMainWindow):
         hh.setStretchLastSection(False)
         hh.setMinimumSectionSize(70)
 
-        self.tbl.setColumnWidth(0, 140)
-        self.tbl.setColumnWidth(1, 80)
-        self.tbl.setColumnWidth(2, 80)
-        self.tbl.setColumnWidth(3, 50)
-        self.tbl.setColumnWidth(4, 50)
-        self.tbl.setColumnWidth(5, 50)
-        self.tbl.setColumnWidth(6, 50)
-        self.tbl.setColumnWidth(7, 185)
+        self.tbl.setColumnWidth(0, 150)
+        self.tbl.setColumnWidth(1, 85)
+        self.tbl.setColumnWidth(2, 105)
+        self.tbl.setColumnWidth(3, 40)
+        self.tbl.setColumnWidth(4, 40)
+        self.tbl.setColumnWidth(5, 140)
+        self.tbl.setColumnWidth(6, 120)
 
         btn_bar = QWidget()
         btn_bar_l = QHBoxLayout(btn_bar)
@@ -1914,21 +1988,33 @@ class MainWindow(QMainWindow):
     def remove_selected(self):
         idxs = self.tbl.selectionModel().selectedRows()
         if not idxs:
-            QMessageBox.information(self, "No selection", "Select a row in the table to remove.")
+            QMessageBox.information(self, "No selection", "Select one or more rows in the table to remove.")
             return
 
-        r = idxs[0].row()
-        if r < 0 or r >= len(self.plan):
+        rows = sorted({idx.row() for idx in idxs}, reverse=True)
+        names = [self.plan[r].name for r in rows if 0 <= r < len(self.plan)]
+
+        if len(rows) == 1:
+            msg = f"Remove '{names[0]}' from the plan?"
+        else:
+            preview = "\n".join(names[:10])
+            extra = "" if len(names) <= 10 else f"\n...and {len(names) - 10} more"
+            msg = f"Remove these {len(rows)} targets from the plan?\n\n{preview}{extra}"
+
+        if QMessageBox.question(self, "Remove target(s)", msg) != QMessageBox.Yes:
             return
 
-        name = self.plan[r].name
-        if QMessageBox.question(self, "Remove target", f"Remove '{name}' from the plan?") != QMessageBox.Yes:
-            return
+        for r in rows:
+            if 0 <= r < len(self.plan):
+                self.plan.pop(r)
+                self.tbl.removeRow(r)
 
-        self.plan.pop(r)
-        self.tbl.removeRow(r)
         self._selected_row = None
-        self.statusBar().showMessage(f"Removed: {name}")
+
+        if len(rows) == 1:
+            self.statusBar().showMessage(f"Removed: {names[0]}")
+        else:
+            self.statusBar().showMessage(f"Removed {len(rows)} targets.")
 
         if not self.plan:
             self._last_coords = []
@@ -1937,9 +2023,10 @@ class MainWindow(QMainWindow):
             self._set_finder_figs(core.plt.figure(figsize=(7.8, 6.3)), core.plt.figure(figsize=(7.8, 6.3)))
             return
 
-        new_r = min(r, self.tbl.rowCount() - 1)
-        self.tbl.selectRow(new_r)
-        self.on_row_selected()
+        new_r = min(rows[-1], self.tbl.rowCount() - 1)
+        if new_r >= 0:
+            self.tbl.selectRow(new_r)
+            self.on_row_selected()
 
     # Planning
     def plan_observations(self):
@@ -2167,8 +2254,7 @@ class MainWindow(QMainWindow):
             row.dec,
             str(row.priority),
             row.vmag,
-            row.open_time,
-            row.close_time,
+            row.visible_windows,
             row.notes if (row.notes and row.notes.strip()) else "",
         ]
 
@@ -2176,7 +2262,7 @@ class MainWindow(QMainWindow):
             it = QTableWidgetItem(v)
             it.setFlags(it.flags() ^ Qt.ItemIsEditable)
 
-            if c == 7:
+            if c in (5, 6):
                 txt = str(v or "").strip()
                 if txt:
                     it.setToolTip(txt)
