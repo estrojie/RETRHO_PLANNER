@@ -35,7 +35,7 @@ from astropy.wcs.utils import pixel_to_skycoord
 import warnings
 from astroquery.exceptions import NoResultsWarning
 # Local modules
-import planner_core_v6 as core
+import planner_core as core
 
 # Qt6/PySide6 standard icon helper
 def std_icon(widget: QWidget, enum_name: str):
