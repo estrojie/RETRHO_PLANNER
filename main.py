@@ -1,6 +1,7 @@
 # main.py
 from __future__ import annotations
 import sys
+from io import BytesIO
 from dataclasses import dataclass
 from typing import List
 from datetime import date
@@ -18,7 +19,7 @@ from matplotlib.backends.backend_qtagg import (
 from matplotlib.patches import Rectangle
 # PySide6
 from PySide6.QtCore import Qt, QThread, Signal, QDate, QSize, QTimer, QSignalBlocker
-from PySide6.QtGui import QTextDocument, QFont
+from PySide6.QtGui import QTextDocument, QFont, QImage, QPixmap, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QGroupBox, QFormLayout, QLabel, QPushButton, QTabWidget, QFileDialog,
@@ -34,7 +35,7 @@ from astropy.wcs.utils import pixel_to_skycoord
 import warnings
 from astroquery.exceptions import NoResultsWarning
 # Local modules
-import planner_core as core
+import planner_core_v6 as core
 
 # Qt6/PySide6 standard icon helper
 def std_icon(widget: QWidget, enum_name: str):
@@ -48,6 +49,31 @@ def std_icon(widget: QWidget, enum_name: str):
     if sp is None:
         sp = QStyle.StandardPixmap.SP_FileIcon
     return widget.style().standardIcon(sp)
+
+
+def style_toolbar_button(btn: QPushButton):
+    """Apply the highlighted toolbar-button styling already defined in the app QSS."""
+    btn.setProperty("toolbarButton", True)
+    btn.setCursor(Qt.PointingHandCursor)
+    try:
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+    except Exception:
+        pass
+
+
+def copy_figure_to_clipboard(fig, parent=None, success_message: str = "Plot copied to clipboard."):
+    try:
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+        image = QImage.fromData(buf.getvalue(), "PNG")
+        if image.isNull():
+            raise RuntimeError("Failed to create clipboard image from figure.")
+        QGuiApplication.clipboard().setPixmap(QPixmap.fromImage(image))
+        if parent is not None and hasattr(parent, "statusBar"):
+            parent.statusBar().showMessage(success_message, 3000)
+    except Exception as e:
+        QMessageBox.warning(parent, "Clipboard Error", f"Could not copy plot to clipboard.\n\n{e}")
 
 
 # App styling (Theme / QSS)
@@ -97,6 +123,24 @@ def apply_app_style(app: QApplication):
     }
     QPushButton:hover { background-color: #353944; }
     QPushButton:pressed { background-color: #4b5060; }
+    QPushButton[toolbarButton="true"] {
+        background-color: #262b34;
+        border: 1px solid #41506a;
+        padding: 7px 12px;
+    }
+    QPushButton[toolbarButton="true"]:hover {
+        background-color: #2e3f57;
+        border: 1px solid #5a8fd8;
+    }
+    QPushButton[toolbarButton="true"]:pressed {
+        background-color: #1f5fa6;
+        border: 1px solid #79aef0;
+    }
+    QPushButton[toolbarButton="true"]:checked {
+        background-color: #1b4f8a;
+        border: 1px solid #4a90e2;
+        color: #ffffff;
+    }
     QPushButton:disabled { color: #888; background-color: #23262c; border-color: #2c2f36; }
     QPushButton:checked {
     background-color: #1b4f8a;
@@ -251,7 +295,7 @@ class FinderWorker(QThread):
     finished = Signal(int, object, object)
     failed = Signal(int, str)
 
-    def __init__(self, request_id: int, name: str, ra: str, dec: str, fov1: int, fov2: int, mode: str):
+    def __init__(self, request_id: int, name: str, ra: str, dec: str, fov1: int, fov2: int, mode: str, roll_deg: float = 0.0):
         super().__init__()
         self.request_id = request_id
         self.name = name
@@ -260,12 +304,13 @@ class FinderWorker(QThread):
         self.fov1 = fov1
         self.fov2 = fov2
         self.mode = mode
+        self.roll_deg = float(roll_deg)
 
     def run(self):
         try:
             rt = core.resolve_target(self.name, self.ra, self.dec)
-            fig1 = core.finder_figure(rt.coord, rt.display_name, fov_arcmin=self.fov1, mode=self.mode)
-            fig2 = core.finder_figure(rt.coord, rt.display_name, fov_arcmin=self.fov2, mode=self.mode)
+            fig1 = core.finder_figure(rt.coord, rt.display_name, fov_arcmin=self.fov1, mode=self.mode, roll_deg=self.roll_deg)
+            fig2 = core.finder_figure(rt.coord, rt.display_name, fov_arcmin=self.fov2, mode=self.mode, roll_deg=self.roll_deg)
             self.finished.emit(self.request_id, fig1, fig2)
         except Exception as e:
             self.failed.emit(self.request_id, str(e))
@@ -457,8 +502,13 @@ class AltitudeInspectorDialog(QDialog):
         self.btn_unselect_all = QPushButton("Unselect All")
         self.btn_unselect_all.clicked.connect(self._unselect_all)
 
+        self.btn_copy_plot = QPushButton("Copy Plot")
+        self.btn_copy_plot.setIcon(std_icon(self, "SP_DialogSaveButton"))
+        self.btn_copy_plot.clicked.connect(lambda: copy_figure_to_clipboard(self.canvas.figure, self, "Altitude plot copied to clipboard."))
+
         sel_btns_l.addWidget(self.btn_select_first5)
         sel_btns_l.addWidget(self.btn_unselect_all)
+        sel_btns_l.addWidget(self.btn_copy_plot)
 
         cl.addWidget(sel_btns)
         cl.addWidget(self.listw, 1)
@@ -683,6 +733,7 @@ class FinderInspectorDialog(QDialog):
 
         self.parent_window = parent
         self.which_fov = which_fov
+        self._current_roll_deg = float(parent.in_roll.value()) if hasattr(parent, "in_roll") else 0.0
 
         self.mode = None
         self._press_xy = None
@@ -725,6 +776,7 @@ class FinderInspectorDialog(QDialog):
         self.fov_spin.setValue(int(parent.in_fov1.value()) if which_fov == 1 else int(parent.in_fov2.value()))
 
         btn_apply_fov = QPushButton("Update FOV")
+        style_toolbar_button(btn_apply_fov)
         btn_apply_fov.setIcon(std_icon(self, "SP_BrowserReload"))
         btn_apply_fov.clicked.connect(self._request_new_finder)
 
@@ -732,13 +784,29 @@ class FinderInspectorDialog(QDialog):
         self.lw_spin.setRange(1, 12)
         self.lw_spin.setValue(2)
 
+        self.roll_spin = QDoubleSpinBox()
+        self.roll_spin.setRange(-360.0, 360.0)
+        self.roll_spin.setDecimals(1)
+        self.roll_spin.setSingleStep(1.0)
+        self.roll_spin.setSuffix("°")
+        self.roll_spin.setValue(self._current_roll_deg)
+
+        self.btn_copy_plot = QPushButton("Copy Plot")
+        style_toolbar_button(self.btn_copy_plot)
+        self.btn_copy_plot.setIcon(std_icon(self, "SP_DialogSaveButton"))
+        self.btn_copy_plot.clicked.connect(lambda: copy_figure_to_clipboard(self.canvas.figure, self, "Finder chart copied to clipboard."))
+
         tl.addWidget(QLabel("FOV (arcmin):"))
         tl.addWidget(self.fov_spin)
         tl.addWidget(btn_apply_fov)
         tl.addSpacing(20)
+        tl.addWidget(QLabel("Roll:"))
+        tl.addWidget(self.roll_spin)
+        tl.addSpacing(20)
         tl.addWidget(QLabel("Line thickness:"))
         tl.addWidget(self.lw_spin)
         tl.addStretch(1)
+        tl.addWidget(self.btn_copy_plot)
 
         self.left_l.addWidget(top)
 
@@ -906,6 +974,7 @@ class FinderInspectorDialog(QDialog):
     def set_figure(self, fig):
         self._clear_annotations()
         self._replace_plot(fig)
+        self._current_roll_deg = float(self.roll_spin.value()) if hasattr(self, "roll_spin") else self._current_roll_deg
         self._update_wcs_hint_in_title()
         self._label_counter = 0
 
@@ -919,7 +988,7 @@ class FinderInspectorDialog(QDialog):
 
         best = None
         for a in axes:
-            w = getattr(a, "wcs", None)
+            w = getattr(a, "wcs", None) or getattr(a, "_rho_wcs", None)
             if w is None:
                 continue
             try:
@@ -947,7 +1016,7 @@ class FinderInspectorDialog(QDialog):
             except Exception:
                 pass
 
-        w = getattr(ax, "wcs", None)
+        w = getattr(ax, "wcs", None) or getattr(ax, "_rho_wcs", None)
         has_celestial = False
         if w is not None:
             try:
@@ -955,29 +1024,40 @@ class FinderInspectorDialog(QDialog):
             except Exception:
                 has_celestial = False
 
+        x0 = float(x)
+        y0 = float(y)
+        roll_deg = float(getattr(ax, "_rho_roll_deg", 0.0) or 0.0)
+        shape = getattr(ax, "_rho_data_shape", None)
+        if shape is not None and len(shape) >= 2 and abs(roll_deg) > 1e-9:
+            try:
+                h, wpx = float(shape[0]), float(shape[1])
+                x0, y0 = core.viewer_to_original_pixel(x0, y0, wpx, h, roll_deg)
+            except Exception:
+                pass
+
         if has_celestial:
             for origin in (0, 1):
                 try:
-                    c = pixel_to_skycoord(float(x), float(y), w, origin=origin)
+                    c = pixel_to_skycoord(float(x0), float(y0), w, origin=origin)
                     if c is not None:
                         _accept(c)
                 except Exception:
                     pass
 
             try:
-                c2 = w.pixel_to_world(float(x), float(y))
+                c2 = w.pixel_to_world(float(x0), float(y0))
                 if isinstance(c2, SkyCoord):
                     _accept(c2)
             except Exception:
                 pass
 
         try:
-            _accept(SkyCoord(float(x) * u.deg, float(y) * u.deg, frame="icrs"))
+            _accept(SkyCoord(float(x0) * u.deg, float(y0) * u.deg, frame="icrs"))
         except Exception:
             pass
 
         try:
-            _accept(SkyCoord(float(x) * u.hourangle, float(y) * u.deg, frame="icrs"))
+            _accept(SkyCoord(float(x0) * u.hourangle, float(y0) * u.deg, frame="icrs"))
         except Exception:
             pass
 
@@ -1001,8 +1081,12 @@ class FinderInspectorDialog(QDialog):
         ax = self._ax()
         if ax is None:
             return
-        w = getattr(ax, "wcs", None)
-        extra = " (WCS OK)" if w is not None else " (No WCS — ID/sky sep disabled)"
+        w = getattr(ax, "wcs", None) or getattr(ax, "_rho_wcs", None)
+        rolled = float(getattr(ax, "_rho_roll_deg", 0.0) or 0.0)
+        if w is not None:
+            extra = f" (WCS OK, roll={rolled:.1f}°)" if abs(rolled) > 1e-9 else " (WCS OK)"
+        else:
+            extra = f" (No WCS — roll={rolled:.1f}°)" if abs(rolled) > 1e-9 else " (No WCS — ID/sky sep disabled)"
         t = ax.get_title()
         if extra not in t:
             ax.set_title(t + extra)
@@ -1507,6 +1591,8 @@ class FinderInspectorDialog(QDialog):
             return
 
         new_fov = int(self.fov_spin.value())
+        new_roll = float(self.roll_spin.value())
+        self.parent_window.in_roll.setValue(new_roll)
         if self.which_fov == 1:
             self.parent_window.in_fov1.setValue(new_fov)
         else:
@@ -1531,6 +1617,7 @@ class MainWindow(QMainWindow):
         self.in_max_alt.setValue(self._default_max_alt)
         self.in_fov1.setValue(self._default_fov1)
         self.in_fov2.setValue(self._default_fov2)
+        self.in_roll.setValue(self._default_roll)
         self.in_survey.setCurrentText(self._default_survey)
 
         # Apply immediately so sky conditions/plots update
@@ -1593,6 +1680,7 @@ class MainWindow(QMainWindow):
         self._default_max_alt = int(core.DEFAULT_MAX_ALT_DEG)
         self._default_fov1 = int(core.DEFAULT_FOV1_ARCMIN)
         self._default_fov2 = int(core.DEFAULT_FOV2_ARCMIN)
+        self._default_roll = 0.0
         self._default_survey = "DSS"
 
         self.lat_spin = QDoubleSpinBox()
@@ -1686,15 +1774,25 @@ class MainWindow(QMainWindow):
         self.in_fov2.setRange(1, 360)
         self.in_fov2.setValue(core.DEFAULT_FOV2_ARCMIN)
 
+        self.in_roll = QDoubleSpinBox()
+        self.in_roll.setRange(-360.0, 360.0)
+        self.in_roll.setDecimals(1)
+        self.in_roll.setSingleStep(1.0)
+        self.in_roll.setSuffix("°")
+        self.in_roll.setValue(0.0)
+        self.in_roll.valueChanged.connect(self.refresh_finders_for_selected)
+
         self.in_survey = QComboBox()
-        self.in_survey.addItems(["DSS", "DSS2 Red", "SkyView"])
+        self.in_survey.addItems(["DSS", "DSS2 Red", "DSS2 Blue", "Pan-STARRS"])
         self.in_survey.setCurrentText("DSS")
+        self.in_survey.setToolTip("Choose the survey used for the finder chart. Pan-STARRS is deeper but is not full-sky.")
         self.in_survey.currentIndexChanged.connect(self.refresh_finders_for_selected)
 
         settings_form.addRow("Min alt (°):", self.in_min_alt)
         settings_form.addRow("Max alt (°):", self.in_max_alt)
         settings_form.addRow("Finder FOV1 (arcmin):", self.in_fov1)
         settings_form.addRow("Finder FOV2 (arcmin):", self.in_fov2)
+        settings_form.addRow("Finder roll:", self.in_roll)
         settings_form.addRow("Finder source:", self.in_survey)
 
         left_l.addWidget(plan_box)
@@ -1731,17 +1829,15 @@ class MainWindow(QMainWindow):
             pass
 
         hh = self.tbl.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setStretchLastSection(False)
-        hh.setMinimumSectionSize(70)
-
-        self.tbl.setColumnWidth(0, 150)
-        self.tbl.setColumnWidth(1, 85)
-        self.tbl.setColumnWidth(2, 105)
-        self.tbl.setColumnWidth(3, 40)
-        self.tbl.setColumnWidth(4, 40)
-        self.tbl.setColumnWidth(5, 140)
-        self.tbl.setColumnWidth(6, 120)
+        hh.setMinimumSectionSize(60)
+        hh.setSectionResizeMode(0, QHeaderView.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(5, QHeaderView.Stretch)
+        hh.setSectionResizeMode(6, QHeaderView.Stretch)
 
         btn_bar = QWidget()
         btn_bar_l = QHBoxLayout(btn_bar)
@@ -1795,6 +1891,26 @@ class MainWindow(QMainWindow):
         alt_l.setSpacing(8)
         alt_l.addWidget(QLabel("Altitude Plot (selected date & location)"))
 
+        alt_btn_row = QWidget()
+        alt_btn_row_l = QHBoxLayout(alt_btn_row)
+        alt_btn_row_l.setContentsMargins(0, 0, 0, 0)
+        alt_btn_row_l.setSpacing(8)
+
+        self.btn_open_altitude_inspector = QPushButton("Open Altitude Inspector")
+        style_toolbar_button(self.btn_open_altitude_inspector)
+        self.btn_open_altitude_inspector.setIcon(std_icon(self, "SP_FileDialogDetailedView"))
+        self.btn_open_altitude_inspector.clicked.connect(self.open_altitude_inspector)
+
+        self.btn_copy_altitude = QPushButton("Copy Altitude Plot")
+        style_toolbar_button(self.btn_copy_altitude)
+        self.btn_copy_altitude.setIcon(std_icon(self, "SP_DialogSaveButton"))
+        self.btn_copy_altitude.clicked.connect(self.copy_altitude_plot)
+
+        alt_btn_row_l.addWidget(self.btn_open_altitude_inspector)
+        alt_btn_row_l.addWidget(self.btn_copy_altitude)
+        alt_btn_row_l.addStretch(1)
+        alt_l.addWidget(alt_btn_row)
+
         self.alt_canvas = FigureCanvas(core.plt.figure(figsize=(7.8, 4.9)))
         alt_l.addWidget(self.alt_canvas, 1)
         right_split.addWidget(alt_container)
@@ -1805,6 +1921,39 @@ class MainWindow(QMainWindow):
         finder_l.setContentsMargins(10, 10, 10, 10)
         finder_l.setSpacing(8)
         finder_l.addWidget(QLabel("Finder Charts (selected target)"))
+
+        finder_btn_row = QWidget()
+        finder_btn_row_l = QHBoxLayout(finder_btn_row)
+        finder_btn_row_l.setContentsMargins(0, 0, 0, 0)
+        finder_btn_row_l.setSpacing(8)
+
+        self.btn_open_finder_1 = QPushButton("Open FOV1 Inspector")
+        style_toolbar_button(self.btn_open_finder_1)
+        self.btn_open_finder_1.setIcon(std_icon(self, "SP_FileDialogDetailedView"))
+        self.btn_open_finder_1.clicked.connect(lambda: self.open_finder_inspector(1))
+
+        self.btn_copy_finder_1 = QPushButton("Copy FOV1")
+        style_toolbar_button(self.btn_copy_finder_1)
+        self.btn_copy_finder_1.setIcon(std_icon(self, "SP_DialogSaveButton"))
+        self.btn_copy_finder_1.clicked.connect(lambda: self.copy_finder_plot(1))
+
+        self.btn_open_finder_2 = QPushButton("Open FOV2 Inspector")
+        style_toolbar_button(self.btn_open_finder_2)
+        self.btn_open_finder_2.setIcon(std_icon(self, "SP_FileDialogDetailedView"))
+        self.btn_open_finder_2.clicked.connect(lambda: self.open_finder_inspector(2))
+
+        self.btn_copy_finder_2 = QPushButton("Copy FOV2")
+        style_toolbar_button(self.btn_copy_finder_2)
+        self.btn_copy_finder_2.setIcon(std_icon(self, "SP_DialogSaveButton"))
+        self.btn_copy_finder_2.clicked.connect(lambda: self.copy_finder_plot(2))
+
+        finder_btn_row_l.addWidget(self.btn_open_finder_1)
+        finder_btn_row_l.addWidget(self.btn_copy_finder_1)
+        finder_btn_row_l.addSpacing(12)
+        finder_btn_row_l.addWidget(self.btn_open_finder_2)
+        finder_btn_row_l.addWidget(self.btn_copy_finder_2)
+        finder_btn_row_l.addStretch(1)
+        finder_l.addWidget(finder_btn_row)
 
         self.finder_tabs = QTabWidget()
         self.finder_canvas_1 = FigureCanvas(core.plt.figure(figsize=(7.8, 6.3)))
@@ -2104,7 +2253,7 @@ class MainWindow(QMainWindow):
         self._finder_request_id += 1
         req_id = self._finder_request_id
 
-        worker = FinderWorker(req_id, row.name, row.ra, row.dec, fov1, fov2, mode)
+        worker = FinderWorker(req_id, row.name, row.ra, row.dec, fov1, fov2, mode, roll_deg=float(self.in_roll.value()))
         self._finder_workers.add(worker)
 
         worker.finished.connect(self.on_finder_finished)
@@ -2137,70 +2286,79 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Finder charts updated.")
 
+    def open_altitude_inspector(self):
+        if not self._last_coords or not self._last_names:
+            QMessageBox.information(self, "No altitude plot", "Plan at least one target first.")
+            return
+
+        if self._alt_dialog is not None and self._alt_dialog.isVisible():
+            self._alt_dialog.raise_()
+            self._alt_dialog.activateWindow()
+            return
+
+        dlg = AltitudeInspectorDialog(self, self._last_coords, self._last_names, self.in_min_alt.value(), self.in_max_alt.value())
+        self._alt_dialog = dlg
+        dlg.finished.connect(lambda _: setattr(self, "_alt_dialog", None))
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def open_finder_inspector(self, which_fov: int):
+        existing = self._finder_dialog_fov1 if which_fov == 1 else self._finder_dialog_fov2
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        fig = None
+        try:
+            if self._selected_row is not None:
+                row = self._selected_row
+                mode = self.in_survey.currentText()
+                fov = int(self.in_fov1.value()) if which_fov == 1 else int(self.in_fov2.value())
+                rt = core.resolve_target(row.name, row.ra, row.dec)
+                fig = core.finder_figure(rt.coord, rt.display_name, fov_arcmin=fov, mode=mode, roll_deg=float(self.in_roll.value()))
+        except Exception:
+            fig = None
+
+        if fig is None:
+            fig = core.plt.figure(figsize=(7.8, 6.3))
+
+        dlg = FinderInspectorDialog(self, fig, which_fov)
+        if which_fov == 1:
+            self._finder_dialog_fov1 = dlg
+            dlg.finished.connect(lambda _: setattr(self, "_finder_dialog_fov1", None))
+        else:
+            self._finder_dialog_fov2 = dlg
+            dlg.finished.connect(lambda _: setattr(self, "_finder_dialog_fov2", None))
+
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def copy_altitude_plot(self):
+        if self.alt_canvas is None or self.alt_canvas.figure is None:
+            QMessageBox.information(self, "No altitude plot", "There is no altitude plot to copy yet.")
+            return
+        copy_figure_to_clipboard(self.alt_canvas.figure, self, "Altitude plot copied to clipboard.")
+
+    def copy_finder_plot(self, which_fov: int):
+        canvas = self.finder_canvas_1 if which_fov == 1 else self.finder_canvas_2
+        if canvas is None or canvas.figure is None:
+            QMessageBox.information(self, "No finder chart", "There is no finder chart to copy yet.")
+            return
+        copy_figure_to_clipboard(canvas.figure, self, f"Finder FOV{which_fov} copied to clipboard.")
+
     # Click bindings
     def _bind_altitude_click(self):
         def _on_click(event):
-            if not self._last_coords or not self._last_names:
-                return
-
-            if self._alt_dialog is not None and self._alt_dialog.isVisible():
-                self._alt_dialog.raise_()
-                self._alt_dialog.activateWindow()
-                return
-
-            dlg = AltitudeInspectorDialog(
-                self,
-                self._last_coords,
-                self._last_names,
-                self.in_min_alt.value(),
-                self.in_max_alt.value(),
-            )
-            self._alt_dialog = dlg
-            dlg.finished.connect(lambda _: setattr(self, "_alt_dialog", None))
-
-            dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
+            self.open_altitude_inspector()
 
         self.alt_canvas.mpl_connect("button_press_event", _on_click)
 
     def _bind_finder_clicks(self):
-        def _open(which_fov: int):
-            existing = self._finder_dialog_fov1 if which_fov == 1 else self._finder_dialog_fov2
-            if existing is not None and existing.isVisible():
-                existing.raise_()
-                existing.activateWindow()
-                return
-
-            fig = None
-            try:
-                if self._selected_row is not None:
-                    row = self._selected_row
-                    mode = self.in_survey.currentText()
-                    fov = int(self.in_fov1.value()) if which_fov == 1 else int(self.in_fov2.value())
-                    rt = core.resolve_target(row.name, row.ra, row.dec)
-                    fig = core.finder_figure(rt.coord, rt.display_name, fov_arcmin=fov, mode=mode)
-            except Exception:
-                fig = None
-
-            if fig is None:
-                fig = core.plt.figure(figsize=(7.8, 6.3))
-
-            dlg = FinderInspectorDialog(self, fig, which_fov)
-
-            if which_fov == 1:
-                self._finder_dialog_fov1 = dlg
-                dlg.finished.connect(lambda _: setattr(self, "_finder_dialog_fov1", None))
-            else:
-                self._finder_dialog_fov2 = dlg
-                dlg.finished.connect(lambda _: setattr(self, "_finder_dialog_fov2", None))
-
-            dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
-
-        self.finder_canvas_1.mpl_connect("button_press_event", lambda e: _open(1))
-        self.finder_canvas_2.mpl_connect("button_press_event", lambda e: _open(2))
+        self.finder_canvas_1.mpl_connect("button_press_event", lambda e: self.open_finder_inspector(1))
+        self.finder_canvas_2.mpl_connect("button_press_event", lambda e: self.open_finder_inspector(2))
 
     # Clean shutdown
     def closeEvent(self, event):
