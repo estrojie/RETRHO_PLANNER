@@ -28,9 +28,14 @@ from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.utils import iers
 from astropy.visualization import ZScaleInterval
 from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
+from astropy.io import fits
+from io import BytesIO, StringIO
 from astroplan import Observer, FixedTarget
 from astroplan.plots import plot_finder_image
 from astroquery.simbad import Simbad
+from PIL import Image
+from scipy.ndimage import affine_transform, map_coordinates
 
 # Defaults (RHO)
 DEFAULT_LAT = 29.400041
@@ -46,6 +51,9 @@ DEFAULT_FOV1_ARCMIN = 90
 DEFAULT_FOV2_ARCMIN = 20
 
 SKYVIEW_SURVEYS = ["DSS2 Red", "DSS2 Blue", "DSS"]
+PANSTARRS_FILTER = "r"
+PANSTARRS_FILENAME_URL = "https://ps1images.stsci.edu/cgi-bin/ps1filenames.py"
+PANSTARRS_FITSCUT_URL = "https://ps1images.stsci.edu/cgi-bin/fitscut.cgi"
 
 NWS_HEADERS = {
     "User-Agent": "RHOPlanner/1.0",
@@ -54,6 +62,250 @@ NWS_HEADERS = {
 
 # For notes / UI warnings
 DEC_WARNING_LIMIT_DEG = 60.0
+
+
+def _normalize_to_uint8(data: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
+    arr = np.asarray(data, dtype=float)
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        vmin = np.nanmin(arr)
+        vmax = np.nanmax(arr)
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+            return np.zeros(arr.shape, dtype=np.uint8)
+    scaled = np.clip((arr - vmin) / (vmax - vmin), 0.0, 1.0)
+    return np.round(scaled * 255.0).astype(np.uint8)
+
+
+def _rotate_grayscale_image(data: np.ndarray, roll_deg: float, vmin: float, vmax: float) -> np.ndarray:
+    img8 = _normalize_to_uint8(data, vmin, vmax)
+    pil = Image.fromarray(img8, mode="L")
+    rotated = pil.rotate(float(roll_deg), resample=Image.Resampling.BICUBIC, expand=False, fillcolor=0)
+    return np.asarray(rotated, dtype=np.uint8)
+
+
+def _rotation_matrix_deg(angle_deg: float) -> np.ndarray:
+    theta = np.deg2rad(float(angle_deg))
+    return np.array([
+        [float(np.cos(theta)), -float(np.sin(theta))],
+        [float(np.sin(theta)),  float(np.cos(theta))],
+    ], dtype=float)
+
+
+def _rotate_data_with_affine(data: np.ndarray, roll_deg: float, fill_value: float | None = None) -> np.ndarray:
+    arr = np.asarray(data, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("Expected a 2D image array for finder chart rotation.")
+
+    ny, nx = arr.shape
+    center = np.array([(ny - 1.0) / 2.0, (nx - 1.0) / 2.0], dtype=float)
+
+    rot_minus = _rotation_matrix_deg(-float(roll_deg))
+    # affine_transform uses array-order coordinates: (row, col) == (y, x)
+    mat_xy = rot_minus
+    mat_rc = np.array([
+        [mat_xy[1, 1], mat_xy[1, 0]],
+        [mat_xy[0, 1], mat_xy[0, 0]],
+    ], dtype=float)
+    offset = center - mat_rc @ center
+
+    if fill_value is None:
+        finite = arr[np.isfinite(arr)]
+        fill_value = float(np.nanmedian(finite)) if finite.size else 0.0
+
+    rotated = affine_transform(
+        arr,
+        matrix=mat_rc,
+        offset=offset,
+        output_shape=arr.shape,
+        order=1,
+        mode="constant",
+        cval=float(fill_value),
+        prefilter=True,
+    )
+    return rotated
+
+
+def _rotated_wcs(wcs: WCS, shape: tuple[int, int], roll_deg: float) -> WCS:
+    new_wcs = wcs.deepcopy()
+    ny, nx = int(shape[0]), int(shape[1])
+    center = np.array([nx / 2.0, ny / 2.0], dtype=float)
+    rot_minus = _rotation_matrix_deg(-float(roll_deg))
+
+    try:
+        if getattr(new_wcs.wcs, "has_cd", lambda: False)():
+            cd = np.array(new_wcs.wcs.cd, dtype=float)
+            new_wcs.wcs.cd = cd @ rot_minus
+        else:
+            pc = np.array(new_wcs.wcs.get_pc(), dtype=float)
+            new_wcs.wcs.pc = pc @ rot_minus
+    except Exception:
+        pc = np.array(new_wcs.wcs.get_pc(), dtype=float)
+        new_wcs.wcs.pc = pc @ rot_minus
+
+    try:
+        new_wcs.wcs.crpix = center
+    except Exception:
+        pass
+
+    return new_wcs
+
+
+def regenerate_rolled_finder_data(data: np.ndarray, wcs: WCS, roll_deg: float) -> tuple[np.ndarray, WCS]:
+    arr = np.asarray(data, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    fill_value = float(np.nanmedian(finite)) if finite.size else 0.0
+    rolled = _rotate_data_with_affine(arr, roll_deg, fill_value=fill_value)
+    return rolled, _rotated_wcs(wcs, arr.shape, roll_deg)
+
+
+def _roll_pad_factor(roll_deg: float, dec_deg: float | None = None, extra_margin: float = 0.35) -> float:
+    theta = np.deg2rad(float(roll_deg))
+    base = abs(np.cos(theta)) + abs(np.sin(theta)) + float(extra_margin)
+    pad = max(1.75, float(base))
+    if dec_deg is not None and abs(float(dec_deg)) >= 75.0:
+        pad = max(pad, 2.20)
+    return pad
+
+
+def _center_crop(data: np.ndarray, ny: int, nx: int) -> tuple[np.ndarray, tuple[int, int]]:
+    arr = np.asarray(data)
+    sy, sx = arr.shape[:2]
+    ny = min(int(ny), int(sy))
+    nx = min(int(nx), int(sx))
+    y0 = max(0, (sy - ny) // 2)
+    x0 = max(0, (sx - nx) // 2)
+    return arr[y0:y0 + ny, x0:x0 + nx].copy(), (y0, x0)
+
+
+def _center_crop_wcs(wcs: WCS, y0: int, x0: int) -> WCS:
+    new_wcs = wcs.deepcopy()
+    try:
+        new_wcs.wcs.crpix = np.array(new_wcs.wcs.crpix, dtype=float) - np.array([float(x0), float(y0)], dtype=float)
+    except Exception:
+        pass
+    return new_wcs
+
+
+def regenerate_rolled_finder_data_with_padding(
+    data: np.ndarray,
+    wcs: WCS,
+    roll_deg: float,
+    final_shape: tuple[int, int],
+) -> tuple[np.ndarray, WCS]:
+    arr = np.asarray(data, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    fill_value = float(np.nanmedian(finite)) if finite.size else 0.0
+    rolled = _rotate_data_with_affine(arr, roll_deg, fill_value=fill_value)
+    rolled_wcs = _rotated_wcs(wcs, arr.shape, roll_deg)
+    cropped, (y0, x0) = _center_crop(rolled, int(final_shape[0]), int(final_shape[1]))
+    cropped_wcs = _center_crop_wcs(rolled_wcs, y0, x0)
+    return cropped, cropped_wcs
+
+
+def _build_output_wcs_from_reference(ref_wcs: WCS, center_coord: SkyCoord, shape: tuple[int, int], roll_deg: float = 0.0) -> WCS:
+    ny, nx = int(shape[0]), int(shape[1])
+    out = WCS(naxis=2)
+
+    try:
+        ctype = list(ref_wcs.wcs.ctype)
+    except Exception:
+        ctype = ["RA---TAN", "DEC--TAN"]
+    try:
+        cunit = list(ref_wcs.wcs.cunit)
+    except Exception:
+        cunit = [u.deg, u.deg]
+
+    try:
+        scales_deg = np.abs(proj_plane_pixel_scales(ref_wcs.celestial)) * 180.0 / np.pi
+    except Exception:
+        if getattr(ref_wcs.wcs, 'cdelt', None) is not None and len(ref_wcs.wcs.cdelt) >= 2:
+            scales_deg = np.abs(np.asarray(ref_wcs.wcs.cdelt[:2], dtype=float))
+        else:
+            scales_deg = np.array([1.0 / 3600.0, 1.0 / 3600.0], dtype=float)
+
+    # Keep standard astronomical handedness: RA decreases to the right.
+    cdelt = np.array([-float(scales_deg[0]), float(scales_deg[1])], dtype=float)
+
+    theta = np.deg2rad(float(roll_deg))
+    pc = np.array([
+        [np.cos(theta), -np.sin(theta)],
+        [np.sin(theta),  np.cos(theta)],
+    ], dtype=float)
+
+    out.wcs.crpix = [nx / 2.0 + 0.5, ny / 2.0 + 0.5]
+    out.wcs.crval = [float(center_coord.icrs.ra.deg), float(center_coord.icrs.dec.deg)]
+    out.wcs.ctype = ctype
+    out.wcs.cunit = cunit
+    out.wcs.cdelt = cdelt
+    out.wcs.pc = pc
+    return out
+
+
+def _reproject_to_output_wcs(data: np.ndarray, input_wcs: WCS, output_wcs: WCS, shape_out: tuple[int, int], fill_value: float = np.nan) -> np.ndarray:
+    arr = np.asarray(data, dtype=float)
+    ny, nx = int(shape_out[0]), int(shape_out[1])
+    yy, xx = np.indices((ny, nx), dtype=float)
+
+    world = output_wcs.pixel_to_world(xx + 0.5, yy + 0.5)
+    xin, yin = input_wcs.world_to_pixel(world)
+    xin = np.asarray(xin, dtype=float)
+    yin = np.asarray(yin, dtype=float)
+
+    # map_coordinates uses array order (row, col) -> (y, x) and zero-based pixels.
+    sampled = map_coordinates(
+        arr,
+        [yin, xin],
+        order=1,
+        mode='constant',
+        cval=float(fill_value) if np.isfinite(fill_value) else np.nan,
+        prefilter=True,
+    )
+
+    invalid = (~np.isfinite(xin)) | (~np.isfinite(yin)) | (xin < -0.5) | (yin < -0.5) | (xin > (arr.shape[1] - 0.5)) | (yin > (arr.shape[0] - 0.5))
+    sampled = np.asarray(sampled, dtype=float)
+    sampled[invalid] = np.nan
+    return sampled
+
+
+def regenerate_rolled_finder_reprojected(
+    data: np.ndarray,
+    input_wcs: WCS,
+    center_coord: SkyCoord,
+    final_shape: tuple[int, int],
+    roll_deg: float,
+) -> tuple[np.ndarray, WCS]:
+    out_wcs = _build_output_wcs_from_reference(input_wcs, center_coord, final_shape, roll_deg=roll_deg)
+    reproj = _reproject_to_output_wcs(data, input_wcs, out_wcs, final_shape, fill_value=np.nan)
+    return reproj, out_wcs
+
+
+def _render_figure_to_array(fig: plt.Figure) -> np.ndarray:
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
+    return buf[:, :, :3].copy()
+
+
+def _rotate_rgb_image(rgb: np.ndarray, roll_deg: float) -> np.ndarray:
+    pil = Image.fromarray(np.asarray(rgb, dtype=np.uint8), mode="RGB")
+    rotated = pil.rotate(float(roll_deg), resample=Image.Resampling.BICUBIC, expand=False, fillcolor=(0, 0, 0))
+    return np.asarray(rotated, dtype=np.uint8)
+
+
+def rotate_point_about_center(x: float, y: float, width: float, height: float, angle_deg: float) -> tuple[float, float]:
+    cx = (float(width) - 1.0) / 2.0
+    cy = (float(height) - 1.0) / 2.0
+    theta = np.deg2rad(float(angle_deg))
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
+    dx = float(x) - cx
+    dy = float(y) - cy
+    xr = dx * cos_t - dy * sin_t
+    yr = dx * sin_t + dy * cos_t
+    return xr + cx, yr + cy
+
+
+def viewer_to_original_pixel(x: float, y: float, width: float, height: float, roll_deg: float) -> tuple[float, float]:
+    return rotate_point_about_center(x, y, width, height, -float(roll_deg))
 
 # Runtime state (editable from UI)
 @dataclass
@@ -400,7 +652,7 @@ def plot_altitudes(
         coords = [c for c, _ in keep]
         names  = [n for _, n in keep]
 
-    fig, ax = plt.subplots(figsize=(12.5, 6.2))
+    fig, ax = plt.subplots(figsize=(12.8, 6.5))
     ax.set_facecolor("black")
     fig.patch.set_facecolor("black")
 
@@ -454,13 +706,14 @@ def plot_altitudes(
         ax.set_ylim(0, 90)
         ax.set_ylabel("Altitude (°)", color="white")
 
-    ax.set_xlabel(xlab, color="white")
+    ax.set_xlabel(xlab, color="white", labelpad=8)
 
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1, tz=tz_disp))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=tz_disp))
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.tick_params(colors="white")
     fig.autofmt_xdate(rotation=30)
+    ax.margins(x=0.015, y=0.04)
 
     leg = ax.legend(
         framealpha=0.75,
@@ -472,12 +725,12 @@ def plot_altitudes(
     for t in leg.get_texts():
         t.set_color("white")
 
-    fig.subplots_adjust(left=0.06, right=0.995, top=0.95, bottom=0.18)
+    fig.subplots_adjust(left=0.085, right=0.985, top=0.94, bottom=0.24)
     plt.close(fig)
     return fig
 
 # Finder charts
-def finder_figure_astroplan(coord: SkyCoord, name: str, fov_arcmin: int, survey: str) -> plt.Figure:
+def finder_figure_astroplan(coord: SkyCoord, name: str, fov_arcmin: int, survey: str, roll_deg: float = 0.0) -> plt.Figure:
     fixed = FixedTarget(coord=coord, name=name)
     fig, ax = plt.subplots(figsize=(7.8, 6.4))
     fig.patch.set_facecolor("black")
@@ -490,11 +743,34 @@ def finder_figure_astroplan(coord: SkyCoord, name: str, fov_arcmin: int, survey:
         ax.text(0.5, 0.5, f"Finder chart unavailable\n{survey}\nFOV={fov_arcmin}′",
                 ha="center", va="center", color="white")
         ax.set_title(name, color="white", fontsize=13, pad=10)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     fig.subplots_adjust(left=0.02, right=0.995, top=0.93, bottom=0.04)
+
+    if abs(float(roll_deg)) < 1e-9:
+        plt.close(fig)
+        return fig
+
+    rgb = _render_figure_to_array(fig)
     plt.close(fig)
-    return fig
+    rgb_rot = _rotate_rgb_image(rgb, roll_deg)
+
+    fig2, ax2 = plt.subplots(figsize=(7.8, 6.4))
+    fig2.patch.set_facecolor("black")
+    ax2.set_facecolor("black")
+    ax2.imshow(rgb_rot, origin="lower")
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+    ax2.set_title(f"{name} — {survey} — FOV={fov_arcmin}′ — Roll={float(roll_deg):.1f}°", color="white", fontsize=13, pad=10)
+    ax2._rho_roll_deg = float(roll_deg)
+    ax2._rho_data_shape = rgb.shape[:2]
+    ax2._rho_wcs = None
+
+    fig2.subplots_adjust(left=0.02, right=0.995, top=0.93, bottom=0.04)
+    plt.close(fig2)
+    return fig2
+
 
 def _get_skyview_hdu(coord: SkyCoord, fov_arcmin: int, pixels: int, surveys: List[str]):
     for survey in surveys:
@@ -512,8 +788,69 @@ def _get_skyview_hdu(coord: SkyCoord, fov_arcmin: int, pixels: int, surveys: Lis
             continue
     return None, None
 
-def finder_figure_skyview(coord: SkyCoord, name: str, fov_arcmin: int, pixels: int = 700) -> plt.Figure:
-    used, hdu = _get_skyview_hdu(coord, fov_arcmin, pixels, SKYVIEW_SURVEYS)
+def _get_panstarrs_hdu(coord: SkyCoord, fov_arcmin: int, pixels: int, filt: str = PANSTARRS_FILTER):
+    """Fetch a Pan-STARRS FITS cutout with WCS when available.
+
+    Pan-STARRS is deeper than DSS but is not full-sky; requests can fail for
+    positions outside the survey footprint.
+    """
+    try:
+        params = {
+            "ra": f"{float(coord.icrs.ra.deg):.8f}",
+            "dec": f"{float(coord.icrs.dec.deg):.8f}",
+            "filters": str(filt),
+            "type": "stack",
+            "sep": "comma",
+        }
+        resp = requests.get(PANSTARRS_FILENAME_URL, params=params, timeout=12)
+        resp.raise_for_status()
+        text = (resp.text or "").strip()
+        if not text:
+            return None
+
+        df = pd.read_csv(StringIO(text))
+        if df.empty or "filename" not in df.columns:
+            return None
+
+        filename = str(df.iloc[0]["filename"]).strip()
+        if not filename:
+            return None
+
+        cutout_params = {
+            "ra": f"{float(coord.icrs.ra.deg):.8f}",
+            "dec": f"{float(coord.icrs.dec.deg):.8f}",
+            "size": int(pixels),
+            "format": "fits",
+            "red": filename,
+        }
+        cutout_resp = requests.get(PANSTARRS_FITSCUT_URL, params=cutout_params, timeout=20)
+        cutout_resp.raise_for_status()
+        hdul = fits.open(BytesIO(cutout_resp.content))
+        try:
+            return hdul[0].copy()
+        finally:
+            hdul.close()
+    except Exception:
+        return None
+
+
+def finder_figure_panstarrs(
+    coord: SkyCoord,
+    name: str,
+    fov_arcmin: int,
+    pixels: int = 700,
+    roll_deg: float = 0.0,
+) -> plt.Figure:
+    applied_roll = float(roll_deg)
+    if abs(applied_roll) > 1e-9:
+        pad = _roll_pad_factor(applied_roll, dec_deg=float(coord.icrs.dec.deg))
+        fetch_fov_arcmin = int(np.ceil(float(fov_arcmin) * pad))
+        fetch_pixels = int(np.ceil(int(pixels) * pad))
+    else:
+        fetch_fov_arcmin = int(fov_arcmin)
+        fetch_pixels = int(pixels)
+
+    hdu = _get_panstarrs_hdu(coord, fetch_fov_arcmin, fetch_pixels, filt=PANSTARRS_FILTER)
 
     fig = plt.figure(figsize=(7.8, 6.4))
     fig.patch.set_facecolor("black")
@@ -521,52 +858,179 @@ def finder_figure_skyview(coord: SkyCoord, name: str, fov_arcmin: int, pixels: i
     if hdu is None:
         ax = fig.add_subplot(111)
         ax.set_facecolor("black")
-        ax.text(0.5, 0.5, f"Finder chart unavailable\nFOV={fov_arcmin}′",
+        ax.text(0.5, 0.5, "Pan-STARRS cutout unavailable\n(outside footprint or service unavailable)",
                 ha="center", va="center", color="white")
-        ax.set_title(f"{name}", color="white", fontsize=13, pad=10)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title(f"{name} — Pan-STARRS", color="white", fontsize=13, pad=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
         fig.tight_layout()
         plt.close(fig)
         return fig
 
-    data = hdu.data
-    wcs = WCS(hdu.header)
-    ax = fig.add_subplot(111, projection=wcs)
-    ax.set_facecolor("black")
+    data = np.asarray(hdu.data, dtype=float)
+    if data.ndim > 2:
+        data = np.squeeze(data)
+    wcs = WCS(hdu.header).celestial
 
-    vmin, vmax = ZScaleInterval().get_limits(data)
-    ax.imshow(data, origin="lower", vmin=vmin, vmax=vmax, cmap="gray")
+    if abs(applied_roll) > 1e-9:
+        data_plot, wcs_plot = regenerate_rolled_finder_data_with_padding(
+            data, wcs, applied_roll, (int(pixels), int(pixels))
+        )
+    else:
+        data_plot, wcs_plot = data, wcs
+        applied_roll = 0.0
+
+    plot_arr = np.asarray(data_plot, dtype=float)
+    finite = plot_arr[np.isfinite(plot_arr)]
+    if finite.size:
+        vmin, vmax = ZScaleInterval().get_limits(finite)
+    else:
+        vmin, vmax = 0.0, 1.0
+    plot_masked = np.ma.masked_invalid(plot_arr)
+
+    ax = fig.add_subplot(111, projection=wcs_plot)
+    ax.set_facecolor("black")
+    ax.imshow(plot_masked, origin="lower", vmin=vmin, vmax=vmax, cmap="gray", interpolation="nearest")
 
     try:
-        ax.coords[0].set_ticks_position("b")
-        ax.coords[0].set_ticklabel_position("b")
-        ax.coords[0].set_axislabel_position("b")
-
-        ax.coords[1].set_ticks_position("l")
-        ax.coords[1].set_ticklabel_position("l")
-        ax.coords[1].set_axislabel_position("l")
+        ax.coords[0].set_ticks_position('b')
+        ax.coords[0].set_ticklabel_position('b')
+        ax.coords[0].set_axislabel_position('b')
+        ax.coords[1].set_ticks_position('l')
+        ax.coords[1].set_ticklabel_position('l')
+        ax.coords[1].set_axislabel_position('l')
     except Exception:
         pass
 
-    ax.coords.grid(color="white", alpha=0.25, linestyle="--")
-    ax.coords[0].set_axislabel("RA", color="white")
-    ax.coords[1].set_axislabel("Dec", color="white")
-    ax.coords[0].set_ticklabel(color="white")
-    ax.coords[1].set_ticklabel(color="white")
+    if abs(applied_roll) < 1e-9:
+        ax.coords.grid(color='white', alpha=0.20, linestyle='--')
+    ax.coords[0].set_axislabel('RA', color='white')
+    ax.coords[1].set_axislabel('Dec', color='white')
+    ax.coords[0].set_ticklabel(color='white')
+    ax.coords[1].set_ticklabel(color='white')
 
-    title = f"{name} — {used} — FOV={fov_arcmin}′ (SkyView)"
-    fig.suptitle(title, color="white", fontsize=13, y=0.985)
+    title = f"{name} — Pan-STARRS — FOV={fov_arcmin}′"
+    if abs(applied_roll) > 1e-9:
+        title += f" — Roll={applied_roll:.1f}°"
+    fig.suptitle(title, color='white', fontsize=13, y=0.985)
 
-    fig.subplots_adjust(left=0.04, right=0.995, top=0.90, bottom=0.06)
+    ax._rho_roll_deg = 0.0
+    ax._rho_data_shape = np.asarray(data_plot).shape
+    ax._rho_wcs = wcs_plot
+
+    fig.subplots_adjust(left=0.06, right=0.99, top=0.90, bottom=0.08)
     plt.close(fig)
     return fig
 
-def finder_figure(coord: SkyCoord, name: str, fov_arcmin: int, mode: str) -> plt.Figure:
-    if mode == "SkyView":
-        return finder_figure_skyview(coord, name, fov_arcmin, pixels=700)
-    if mode == "DSS2 Red":
-        return finder_figure_astroplan(coord, name, fov_arcmin, survey="DSS2 Red")
-    return finder_figure_astroplan(coord, name, fov_arcmin, survey="DSS")
+
+def finder_figure_skyview(
+    coord: SkyCoord,
+    name: str,
+    fov_arcmin: int,
+    pixels: int = 700,
+    roll_deg: float = 0.0,
+    surveys: List[str] | None = None,
+) -> plt.Figure:
+    survey_list = list(surveys) if surveys else SKYVIEW_SURVEYS
+
+    applied_roll = float(roll_deg)
+    if abs(applied_roll) > 1e-9:
+        pad = _roll_pad_factor(applied_roll, dec_deg=float(coord.icrs.dec.deg))
+        fetch_fov_arcmin = int(np.ceil(float(fov_arcmin) * pad))
+        fetch_pixels = int(np.ceil(int(pixels) * pad))
+    else:
+        fetch_fov_arcmin = int(fov_arcmin)
+        fetch_pixels = int(pixels)
+
+    used, hdu = _get_skyview_hdu(coord, fetch_fov_arcmin, fetch_pixels, survey_list)
+
+    fig = plt.figure(figsize=(7.8, 6.4))
+    fig.patch.set_facecolor('black')
+
+    if hdu is None:
+        ax = fig.add_subplot(111)
+        ax.set_facecolor('black')
+        ax.text(0.5, 0.5, f"Finder chart unavailable\nFOV={fov_arcmin}′",
+                ha='center', va='center', color='white')
+        ax.set_title(f"{name}", color='white', fontsize=13, pad=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.tight_layout()
+        plt.close(fig)
+        return fig
+
+    data = np.asarray(hdu.data, dtype=float)
+    wcs = WCS(hdu.header).celestial
+
+    if abs(applied_roll) > 1e-9:
+        # Use a padded fetch + centered affine rotation path here. It is less brittle
+        # than the experimental reprojection path and keeps the displayed scale sane.
+        data_plot, wcs_plot = regenerate_rolled_finder_data_with_padding(
+            data, wcs, applied_roll, (int(pixels), int(pixels))
+        )
+    else:
+        data_plot, wcs_plot = data, wcs
+        applied_roll = 0.0
+
+    plot_arr = np.asarray(data_plot, dtype=float)
+    finite = plot_arr[np.isfinite(plot_arr)]
+    if finite.size:
+        vmin, vmax = ZScaleInterval().get_limits(finite)
+    else:
+        vmin, vmax = 0.0, 1.0
+    plot_masked = np.ma.masked_invalid(plot_arr)
+
+    ax = fig.add_subplot(111, projection=wcs_plot)
+    ax.set_facecolor('black')
+    ax.imshow(plot_masked, origin='lower', vmin=vmin, vmax=vmax, cmap='gray', interpolation='nearest')
+
+    try:
+        ax.coords[0].set_ticks_position('b')
+        ax.coords[0].set_ticklabel_position('b')
+        ax.coords[0].set_axislabel_position('b')
+        ax.coords[1].set_ticks_position('l')
+        ax.coords[1].set_ticklabel_position('l')
+        ax.coords[1].set_axislabel_position('l')
+    except Exception:
+        pass
+
+    if abs(applied_roll) < 1e-9:
+        ax.coords.grid(color='white', alpha=0.20, linestyle='--')
+    ax.coords[0].set_axislabel('RA', color='white')
+    ax.coords[1].set_axislabel('Dec', color='white')
+    ax.coords[0].set_ticklabel(color='white')
+    ax.coords[1].set_ticklabel(color='white')
+
+    title = f"{name} — {used} — FOV={fov_arcmin}′"
+    if abs(applied_roll) > 1e-9:
+        title += f" — Roll={applied_roll:.1f}°"
+    fig.suptitle(title, color='white', fontsize=13, y=0.985)
+
+    ax._rho_roll_deg = 0.0
+    ax._rho_data_shape = np.asarray(data_plot).shape
+    ax._rho_wcs = wcs_plot
+
+    fig.subplots_adjust(left=0.06, right=0.99, top=0.90, bottom=0.08)
+    plt.close(fig)
+    return fig
+
+
+def finder_figure(coord: SkyCoord, name: str, fov_arcmin: int, mode: str, roll_deg: float = 0.0) -> plt.Figure:
+    mode = str(mode or "DSS").strip()
+
+    if mode in {"DSS", "DSS2 Red", "DSS2 Blue", "SkyView"}:
+        # Keep legacy "SkyView" support by mapping it to the generic DSS option.
+        if mode == "SkyView":
+            mode = "DSS"
+        fig = finder_figure_skyview(coord, name, fov_arcmin, pixels=700, roll_deg=roll_deg, surveys=[mode])
+        return fig
+
+    if mode == "Pan-STARRS":
+        return finder_figure_panstarrs(coord, name, fov_arcmin, pixels=700, roll_deg=roll_deg)
+
+    # Fallback for any custom/unsupported Astroplan survey names.
+    return finder_figure_astroplan(coord, name, fov_arcmin, survey=mode, roll_deg=roll_deg)
+
 
 # Upload parsing
 def _norm_col(s: str) -> str:
