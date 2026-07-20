@@ -21,7 +21,9 @@ def build_collection() -> Tuple[List[tuple], List[tuple], List[str]]:
     PyInstaller already has strong hooks for NumPy, SciPy, pandas, Matplotlib,
     Astropy, Pillow, and PySide6. The additions here cover package metadata,
     astronomy data files, timezone/certificate data, Excel support, and the
-    astroquery services used dynamically by RHO Planner.
+    astroquery services used dynamically by RHO Planner. PyVO is included
+    explicitly because astroquery imports it for VO/TAP support, and PyVO's
+    SAMP package reads bundled package data during import.
     """
     datas: List[tuple] = []
     binaries: List[tuple] = []
@@ -44,6 +46,7 @@ def build_collection() -> Tuple[List[tuple], List[tuple], List[str]]:
         "astropy",
         "astropy_iers_data",
         "astroquery",
+        "pyvo",
         "astroplan",
         "matplotlib",
         "certifi",
