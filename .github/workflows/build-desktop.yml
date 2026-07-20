@@ -42,26 +42,36 @@ jobs:
             requirements-build.txt
 
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-build.txt
 
       - name: Validate source
+        shell: pwsh
         run: python -m compileall -q main.py planner_core.py build_support
 
       - name: Build reliable folder distribution
+        shell: pwsh
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
 
       - name: Build portable single-file executable
+        shell: pwsh
         run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
 
       - name: Package Windows downloads
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Compress-Archive -Path dist\RHOPlanner -DestinationPath release\RHOPlanner-Windows-x64.zip -Force
-          Copy-Item dist-onefile\RHOPlanner.exe release\RHOPlanner-Windows-x64.exe
-          python -m pip freeze | Out-File -Encoding utf8 release\DEPENDENCIES-Windows-x64.txt
+          Compress-Archive `
+            -Path dist\RHOPlanner `
+            -DestinationPath release\RHOPlanner-Windows-x64.zip `
+            -Force
+          Copy-Item `
+            dist-onefile\RHOPlanner.exe `
+            release\RHOPlanner-Windows-x64.exe
+          python -m pip freeze |
+            Out-File -Encoding utf8 release\DEPENDENCIES-Windows-x64.txt
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
@@ -80,7 +90,9 @@ jobs:
             arch: arm64
           - runner: macos-15-intel
             arch: x86_64
+
     runs-on: ${{ matrix.runner }}
+
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
 
@@ -112,21 +124,27 @@ jobs:
             requirements-build.txt
 
       - name: Install dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-build.txt
 
       - name: Validate source
+        shell: bash
         run: python -m compileall -q main.py planner_core.py build_support
 
       - name: Create macOS icon
+        shell: bash
         run: bash ./build_support/make_icns.sh
 
       - name: Build macOS application
+        shell: bash
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
 
       - name: Apply ad-hoc signature and verify bundle
+        shell: bash
         run: |
+          set -euo pipefail
           codesign --force --deep --sign - dist/RHOPlanner.app
           codesign --verify --deep --strict dist/RHOPlanner.app
 
@@ -134,15 +152,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-      
+
           APP_PATH="dist/RHOPlanner.app"
           ZIP_PATH="release/RHOPlanner-macOS-${{ matrix.arch }}.zip"
           DMG_PATH="release/RHOPlanner-macOS-${{ matrix.arch }}.dmg"
-      
+
           rm -rf release
           mkdir -p release
-      
-          # Create the zipped .app bundle.
+
+          # Preserve the macOS application bundle's resource forks and metadata.
           ditto \
             -c \
             -k \
@@ -150,34 +168,31 @@ jobs:
             --keepParent \
             "$APP_PATH" \
             "$ZIP_PATH"
-      
-          # Use a unique temporary directory for DMG creation.
+
+          # Use a unique temporary directory to reduce hdiutil "Resource busy"
+          # failures on GitHub-hosted macOS runners.
           DMG_ROOT="$(mktemp -d "${RUNNER_TEMP}/rho-planner-dmg.XXXXXX")"
-      
+
           cleanup() {
-            rm -rf "$DMG_ROOT"
             hdiutil detach "/Volumes/RHO Planner" -force \
               >/dev/null 2>&1 || true
+            rm -rf "$DMG_ROOT"
           }
           trap cleanup EXIT
-      
+
           ditto "$APP_PATH" "$DMG_ROOT/RHOPlanner.app"
-      
-          # Remove any stale mount or partial image left by hdiutil.
+          ln -s /Applications "$DMG_ROOT/Applications"
+
           hdiutil detach "/Volumes/RHO Planner" -force \
             >/dev/null 2>&1 || true
           rm -f "$DMG_PATH"
-      
           sync
           sleep 2
-      
-          # Retry because GitHub macOS runners occasionally return
-          # "Resource busy" during hdiutil creation.
+
           created=false
-      
           for attempt in 1 2 3; do
-            echo "Creating DMG — attempt ${attempt}/3"
-      
+            echo "Creating DMG - attempt ${attempt}/3"
+
             if hdiutil create \
                 -ov \
                 -format UDZO \
@@ -188,21 +203,23 @@ jobs:
               created=true
               break
             fi
-      
+
             rm -f "$DMG_PATH"
             hdiutil detach "/Volumes/RHO Planner" -force \
               >/dev/null 2>&1 || true
             sleep $((attempt * 5))
           done
-      
+
           if [[ "$created" != true ]]; then
             echo "::error::Unable to create the macOS DMG after three attempts."
             exit 1
           fi
-      
+
           hdiutil verify "$DMG_PATH"
-      
-          echo "Created:"
+          python -m pip freeze \
+            > "release/DEPENDENCIES-macOS-${{ matrix.arch }}.txt"
+
+          echo "Created macOS downloads:"
           ls -lh "$ZIP_PATH" "$DMG_PATH"
 
       - name: Upload macOS artifacts
@@ -235,11 +252,15 @@ jobs:
           echo "RHO_PLANNER_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Validate source syntax
+        shell: bash
         run: python3 -m compileall -q main.py planner_core.py build_support
 
       - name: Build in Debian 11-compatible Python container
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p release
+
           docker run --rm \
             -e RHO_PLANNER_VERSION="$RHO_PLANNER_VERSION" \
             -v "$PWD:/work" \
@@ -250,10 +271,24 @@ jobs:
 
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                binutils patchelf ca-certificates curl file \
-                libglib2.0-0 libgl1 libegl1 libxkbcommon0 libdbus-1-3 \
-                libfontconfig1 libx11-6 libxcb1 libxext6 libxrender1 \
-                libxi6 libxrandr2 libxfixes3
+                binutils \
+                patchelf \
+                ca-certificates \
+                curl \
+                file \
+                libglib2.0-0 \
+                libgl1 \
+                libegl1 \
+                libxkbcommon0 \
+                libdbus-1-3 \
+                libfontconfig1 \
+                libx11-6 \
+                libxcb1 \
+                libxext6 \
+                libxrender1 \
+                libxi6 \
+                libxrandr2 \
+                libxfixes3
               rm -rf /var/lib/apt/lists/*
 
               python -c "import sysconfig; enabled=int(sysconfig.get_config_var(\"Py_ENABLE_SHARED\") or 0); library=sysconfig.get_config_var(\"INSTSONAME\") or sysconfig.get_config_var(\"LDLIBRARY\"); print(f\"Py_ENABLE_SHARED={enabled}\"); print(f\"Python shared library={library}\"); assert enabled == 1, \"The selected Python does not provide a shared libpython.\""
@@ -263,18 +298,23 @@ jobs:
               python -m PyInstaller --noconfirm --clean RHOPlanner.spec
               python -m pip freeze > release/DEPENDENCIES-Linux-x86_64.txt
             '
+
           sudo chown -R "$USER":"$USER" build dist release
 
       - name: Smoke test on Ubuntu 20.04
+        shell: bash
         run: bash ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
 
       - name: Smoke test on Linux Mint 22
+        shell: bash
         run: bash ./build_support/smoke_test_linux_bundle.sh linuxmintd/mint22-amd64
 
       - name: Smoke test on Arch Linux
+        shell: bash
         run: bash ./build_support/smoke_test_linux_bundle.sh archlinux:latest
 
       - name: Create AppImage and tarball
+        shell: bash
         run: bash ./build_support/build_linux_appimage.sh
 
       - name: Upload Linux artifacts
@@ -283,6 +323,71 @@ jobs:
           name: RHOPlanner-Linux-x86_64
           path: release/*
           if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub release
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    needs:
+      - windows-x64
+      - macos
+      - linux-x64
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Verify release downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            "release/RHOPlanner-Windows-x64.zip"
+            "release/RHOPlanner-Windows-x64.exe"
+            "release/RHOPlanner-macOS-arm64.zip"
+            "release/RHOPlanner-macOS-arm64.dmg"
+            "release/RHOPlanner-macOS-x86_64.zip"
+            "release/RHOPlanner-macOS-x86_64.dmg"
+            "release/RHOPlanner-Linux-x86_64.AppImage"
+            "release/RHOPlanner-Linux-x86_64.tar.gz"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing required release file: $file"
+              exit 1
+            fi
+          done
+
+          echo "Verified release downloads:"
+          printf '  %s\n' "${required_files[@]}"
+
+      - name: Create SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+
+          sha256sum \
+            RHOPlanner-Windows-x64.zip \
+            RHOPlanner-Windows-x64.exe \
+            RHOPlanner-macOS-arm64.zip \
+            RHOPlanner-macOS-arm64.dmg \
+            RHOPlanner-macOS-x86_64.zip \
+            RHOPlanner-macOS-x86_64.dmg \
+            RHOPlanner-Linux-x86_64.AppImage \
+            RHOPlanner-Linux-x86_64.tar.gz \
+            > SHA256SUMS.txt
+
       - name: Create or update GitHub release
         shell: bash
         env:
@@ -290,19 +395,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-      
-          mapfile -d '' release_files < <(
-            find release -maxdepth 1 -type f -print0
+
+          release_files=(
+            "release/RHOPlanner-Windows-x64.zip"
+            "release/RHOPlanner-Windows-x64.exe"
+            "release/RHOPlanner-macOS-arm64.zip"
+            "release/RHOPlanner-macOS-arm64.dmg"
+            "release/RHOPlanner-macOS-x86_64.zip"
+            "release/RHOPlanner-macOS-x86_64.dmg"
+            "release/RHOPlanner-Linux-x86_64.AppImage"
+            "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/SHA256SUMS.txt"
           )
-      
-          if [[ ${#release_files[@]} -eq 0 ]]; then
-            echo "::error::No release files were downloaded."
-            exit 1
-          fi
-      
-          echo "Files to publish:"
-          printf '  %s\n' "${release_files[@]}"
-      
+
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload \
               "$GITHUB_REF_NAME" \
