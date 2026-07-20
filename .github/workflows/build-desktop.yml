@@ -131,19 +131,79 @@ jobs:
           codesign --verify --deep --strict dist/RHOPlanner.app
 
       - name: Package macOS downloads
+        shell: bash
         run: |
-          mkdir -p release dmg-root
-          ditto -c -k --sequesterRsrc --keepParent \
-            dist/RHOPlanner.app \
-            release/RHOPlanner-macOS-${{ matrix.arch }}.zip
-          cp -R dist/RHOPlanner.app dmg-root/
-          ln -s /Applications dmg-root/Applications
-          hdiutil create \
-            -volname "RHO Planner" \
-            -srcfolder dmg-root \
-            -ov -format UDZO \
-            release/RHOPlanner-macOS-${{ matrix.arch }}.dmg
-          python -m pip freeze > release/DEPENDENCIES-macOS-${{ matrix.arch }}.txt
+          set -euo pipefail
+      
+          APP_PATH="dist/RHOPlanner.app"
+          ZIP_PATH="release/RHOPlanner-macOS-${{ matrix.arch }}.zip"
+          DMG_PATH="release/RHOPlanner-macOS-${{ matrix.arch }}.dmg"
+      
+          rm -rf release
+          mkdir -p release
+      
+          # Create the zipped .app bundle.
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            "$APP_PATH" \
+            "$ZIP_PATH"
+      
+          # Use a unique temporary directory for DMG creation.
+          DMG_ROOT="$(mktemp -d "${RUNNER_TEMP}/rho-planner-dmg.XXXXXX")"
+      
+          cleanup() {
+            rm -rf "$DMG_ROOT"
+            hdiutil detach "/Volumes/RHO Planner" -force \
+              >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+      
+          ditto "$APP_PATH" "$DMG_ROOT/RHOPlanner.app"
+      
+          # Remove any stale mount or partial image left by hdiutil.
+          hdiutil detach "/Volumes/RHO Planner" -force \
+            >/dev/null 2>&1 || true
+          rm -f "$DMG_PATH"
+      
+          sync
+          sleep 2
+      
+          # Retry because GitHub macOS runners occasionally return
+          # "Resource busy" during hdiutil creation.
+          created=false
+      
+          for attempt in 1 2 3; do
+            echo "Creating DMG — attempt ${attempt}/3"
+      
+            if hdiutil create \
+                -ov \
+                -format UDZO \
+                -fs HFS+ \
+                -volname "RHO Planner" \
+                -srcfolder "$DMG_ROOT" \
+                "$DMG_PATH"; then
+              created=true
+              break
+            fi
+      
+            rm -f "$DMG_PATH"
+            hdiutil detach "/Volumes/RHO Planner" -force \
+              >/dev/null 2>&1 || true
+            sleep $((attempt * 5))
+          done
+      
+          if [[ "$created" != true ]]; then
+            echo "::error::Unable to create the macOS DMG after three attempts."
+            exit 1
+          fi
+      
+          hdiutil verify "$DMG_PATH"
+      
+          echo "Created:"
+          ls -lh "$ZIP_PATH" "$DMG_PATH"
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v7
