@@ -88,6 +88,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Prepare shell scripts
+        shell: bash
+        run: chmod +x build_support/*.sh packaging/linux/AppRun
+
       - name: Set release version
         shell: bash
         run: |
@@ -116,7 +120,7 @@ jobs:
         run: python -m compileall -q main.py planner_core.py build_support
 
       - name: Create macOS icon
-        run: ./build_support/make_icns.sh
+        run: bash ./build_support/make_icns.sh
 
       - name: Build macOS application
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
@@ -156,6 +160,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Prepare shell scripts
+        shell: bash
+        run: chmod +x build_support/*.sh packaging/linux/AppRun
+
       - name: Set release version
         shell: bash
         run: |
@@ -188,16 +196,16 @@ jobs:
           sudo chown -R "$USER":"$USER" build dist release
 
       - name: Smoke test on Ubuntu 20.04
-        run: ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
+        run: bash ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
 
       - name: Smoke test on Linux Mint 22
-        run: ./build_support/smoke_test_linux_bundle.sh linuxmintd/mint22-amd64
+        run: bash ./build_support/smoke_test_linux_bundle.sh linuxmintd/mint22-amd64
 
       - name: Smoke test on Arch Linux
-        run: ./build_support/smoke_test_linux_bundle.sh archlinux:latest
+        run: bash ./build_support/smoke_test_linux_bundle.sh archlinux:latest
 
       - name: Create AppImage and tarball
-        run: ./build_support/build_linux_appimage.sh
+        run: bash ./build_support/build_linux_appimage.sh
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
