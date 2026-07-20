@@ -1,0 +1,242 @@
+name: Build desktop executables
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set release version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          echo "RHO_PLANNER_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Validate source
+        run: python -m compileall -q main.py planner_core.py build_support
+
+      - name: Build reliable folder distribution
+        run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
+
+      - name: Build portable single-file executable
+        run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
+
+      - name: Package Windows downloads
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Compress-Archive -Path dist\RHOPlanner -DestinationPath release\RHOPlanner-Windows-x64.zip -Force
+          Copy-Item dist-onefile\RHOPlanner.exe release\RHOPlanner-Windows-x64.exe
+          python -m pip freeze | Out-File -Encoding utf8 release\DEPENDENCIES-Windows-x64.txt
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: RHOPlanner-Windows-x64
+          path: release/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set release version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          echo "RHO_PLANNER_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Validate source
+        run: python -m compileall -q main.py planner_core.py build_support
+
+      - name: Create macOS icon
+        run: ./build_support/make_icns.sh
+
+      - name: Build macOS application
+        run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
+
+      - name: Apply ad-hoc signature and verify bundle
+        run: |
+          codesign --force --deep --sign - dist/RHOPlanner.app
+          codesign --verify --deep --strict dist/RHOPlanner.app
+
+      - name: Package macOS downloads
+        run: |
+          mkdir -p release dmg-root
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/RHOPlanner.app \
+            release/RHOPlanner-macOS-${{ matrix.arch }}.zip
+          cp -R dist/RHOPlanner.app dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create \
+            -volname "RHO Planner" \
+            -srcfolder dmg-root \
+            -ov -format UDZO \
+            release/RHOPlanner-macOS-${{ matrix.arch }}.dmg
+          python -m pip freeze > release/DEPENDENCIES-macOS-${{ matrix.arch }}.txt
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: RHOPlanner-macOS-${{ matrix.arch }}
+          path: release/*
+          if-no-files-found: error
+
+  linux-x64:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set release version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          echo "RHO_PLANNER_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Validate source syntax
+        run: python3 -m compileall -q main.py planner_core.py build_support
+
+      - name: Build against manylinux 2.28
+        run: |
+          mkdir -p release
+          docker run --rm \
+            -e RHO_PLANNER_VERSION="$RHO_PLANNER_VERSION" \
+            -v "$PWD:/work" \
+            -w /work \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -lc '
+              set -euo pipefail
+              PY=/opt/python/cp311-cp311/bin/python
+              "$PY" -m pip install --upgrade pip
+              "$PY" -m pip install -r requirements.txt -r requirements-build.txt
+              "$PY" -m PyInstaller --noconfirm --clean RHOPlanner.spec
+              "$PY" -m pip freeze > release/DEPENDENCIES-Linux-x86_64.txt
+            '
+          sudo chown -R "$USER":"$USER" build dist release
+
+      - name: Smoke test on Ubuntu 20.04
+        run: ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
+
+      - name: Smoke test on Linux Mint 22
+        run: ./build_support/smoke_test_linux_bundle.sh linuxmintd/mint22-amd64
+
+      - name: Smoke test on Arch Linux
+        run: ./build_support/smoke_test_linux_bundle.sh archlinux:latest
+
+      - name: Create AppImage and tarball
+        run: ./build_support/build_linux_appimage.sh
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: RHOPlanner-Linux-x86_64
+          path: release/*
+          if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub release
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - windows-x64
+      - macos
+      - linux-x64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Create SHA-256 checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --title "RHO Planner $GITHUB_REF_NAME" \
+              --generate-notes
+          fi

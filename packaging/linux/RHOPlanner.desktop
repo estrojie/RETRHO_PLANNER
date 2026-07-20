@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=RHO Planner
+Comment=Observation planning, finder charts, and exposure-time estimates for Rosemary Hill Observatory
+Exec=RHOPlanner
+Icon=rho-planner
+Terminal=false
+Categories=Education;Science;Astronomy;
+StartupNotify=true

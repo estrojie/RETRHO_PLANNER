@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+.venv/
+venv/
+build/
+dist/
+dist-onefile/
+release/
+*.dmg
+*.AppImage
+.DS_Store
