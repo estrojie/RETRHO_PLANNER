@@ -196,15 +196,7 @@ jobs:
                 libxi6 libxrandr2 libxfixes3
               rm -rf /var/lib/apt/lists/*
 
-              python - <<"PY_CHECK"
-              import sysconfig
-              enabled = int(sysconfig.get_config_var("Py_ENABLE_SHARED") or 0)
-              library = sysconfig.get_config_var("INSTSONAME") or sysconfig.get_config_var("LDLIBRARY")
-              print(f"Py_ENABLE_SHARED={enabled}")
-              print(f"Python shared library={library}")
-              if enabled != 1:
-                  raise SystemExit("The selected Python does not provide a shared libpython.")
-              PY_CHECK
+              python -c "import sysconfig; enabled=int(sysconfig.get_config_var(\"Py_ENABLE_SHARED\") or 0); library=sysconfig.get_config_var(\"INSTSONAME\") or sysconfig.get_config_var(\"LDLIBRARY\"); print(f\"Py_ENABLE_SHARED={enabled}\"); print(f\"Python shared library={library}\"); assert enabled == 1, \"The selected Python does not provide a shared libpython.\""
 
               python -m pip install --upgrade pip
               python -m pip install -r requirements.txt -r requirements-build.txt
