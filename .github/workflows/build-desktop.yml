@@ -247,14 +247,34 @@ jobs:
           cd release
           sha256sum * > SHA256SUMS.txt
 
-      - name: Create or update release
+      - name: Create or update GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+      
+          release_files=(
+            "release/RHOPlanner-Windows-x64.zip"
+            "release/RHOPlanner-Windows-x64.exe"
+            "release/RHOPlanner-macOS-arm64.zip"
+            "release/RHOPlanner-macOS-arm64.dmg"
+            "release/RHOPlanner-macOS-x86_64.zip"
+            "release/RHOPlanner-macOS-x86_64.dmg"
+            "release/RHOPlanner-Linux-x86_64.AppImage"
+            "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/SHA256SUMS.txt"
+          )
+      
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+            gh release upload \
+              "$GITHUB_REF_NAME" \
+              "${release_files[@]}" \
+              --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release/* \
+            gh release create \
+              "$GITHUB_REF_NAME" \
+              "${release_files[@]}" \
               --title "RHO Planner $GITHUB_REF_NAME" \
               --generate-notes
           fi
