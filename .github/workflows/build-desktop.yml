@@ -283,48 +283,25 @@ jobs:
           name: RHOPlanner-Linux-x86_64
           path: release/*
           if-no-files-found: error
-
-  github-release:
-    name: Publish GitHub release
-    permissions:
-      contents: write
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - windows-x64
-      - macos
-      - linux-x64
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: release
-          merge-multiple: true
-
-      - name: Create SHA-256 checksums
-        run: |
-          cd release
-          sha256sum * > SHA256SUMS.txt
-
       - name: Create or update GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
       
-          release_files=(
-            "release/RHOPlanner-Windows-x64.zip"
-            "release/RHOPlanner-Windows-x64.exe"
-            "release/RHOPlanner-macOS-arm64.zip"
-            "release/RHOPlanner-macOS-arm64.dmg"
-            "release/RHOPlanner-macOS-x86_64.zip"
-            "release/RHOPlanner-macOS-x86_64.dmg"
-            "release/RHOPlanner-Linux-x86_64.AppImage"
-            "release/RHOPlanner-Linux-x86_64.tar.gz"
-            "release/SHA256SUMS.txt"
+          mapfile -d '' release_files < <(
+            find release -maxdepth 1 -type f -print0
           )
+      
+          if [[ ${#release_files[@]} -eq 0 ]]; then
+            echo "::error::No release files were downloaded."
+            exit 1
+          fi
+      
+          echo "Files to publish:"
+          printf '  %s\n' "${release_files[@]}"
       
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload \
