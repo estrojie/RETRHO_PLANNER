@@ -145,6 +145,7 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.arch }}
+    environment: release
     strategy:
       fail-fast: false
       matrix:
