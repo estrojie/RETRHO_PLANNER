@@ -1,4 +1,6 @@
-PySide6==6.9.3
+# Qt 6.8 LTS is the Linux compatibility baseline for Ubuntu 22.04 / Mint 21.x.
+PySide6==6.8.3; platform_system == "Linux"
+PySide6==6.9.3; platform_system != "Linux"
 
 numpy>=2.1,<3
 pandas>=2.2,<3
