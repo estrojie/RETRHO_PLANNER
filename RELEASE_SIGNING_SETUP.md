@@ -21,6 +21,8 @@ Variables:
 
 Create a Microsoft Artifact Signing account and Public Trust certificate profile, configure GitHub OIDC/federated credentials for the repository, and grant the service principal the Artifact Signing Certificate Profile Signer role.
 
+The Windows signing job uses the GitHub Environment named `release`. Configure the Entra federated credential for the GitHub Actions Environment `release`, which gives a stable OIDC subject across all version tags.
+
 ## macOS GitHub configuration
 
 Secrets:
