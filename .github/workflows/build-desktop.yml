@@ -1,4 +1,4 @@
-name: Build desktop executables
+name: Build desktop releases
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   PYTHON_VERSION: "3.11"
@@ -27,9 +28,28 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
           else
-            version="dev-${GITHUB_SHA::7}"
+            version="0.0.0-dev-${GITHUB_SHA::7}"
           fi
           echo "RHO_PLANNER_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Verify Windows signing configuration for tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          SIGNING_ENDPOINT: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          SIGNING_PROFILE: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+        run: |
+          $missing = @()
+          foreach ($name in @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID','SIGNING_ENDPOINT','SIGNING_ACCOUNT','SIGNING_PROFILE')) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item "env:$name").Value)) { $missing += $name }
+          }
+          if ($missing.Count -gt 0) {
+            throw "Tagged releases require Microsoft Artifact Signing. Missing: $($missing -join ', ')"
+          }
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -41,7 +61,7 @@ jobs:
             requirements.txt
             requirements-build.txt
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
@@ -51,27 +71,69 @@ jobs:
         shell: pwsh
         run: python -m compileall -q main.py planner_core.py build_support
 
-      - name: Build reliable folder distribution
+      - name: Build Windows onedir application
         shell: pwsh
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
 
-      - name: Build portable single-file executable
-        shell: pwsh
-        run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
+      - name: Azure login for Artifact Signing
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Package Windows downloads
+      - name: Sign RHOPlanner executable
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\RHOPlanner\RHOPlanner.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Compress-Archive `
-            -Path dist\RHOPlanner `
-            -DestinationPath release\RHOPlanner-Windows-x64.zip `
-            -Force
-          Copy-Item `
-            dist-onefile\RHOPlanner.exe `
-            release\RHOPlanner-Windows-x64.exe
-          python -m pip freeze |
-            Out-File -Encoding utf8 release\DEPENDENCIES-Windows-x64.txt
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found at $iscc" }
+          & $iscc "/DAppVersion=$env:RHO_PLANNER_VERSION" "packaging\windows\RHOPlanner.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip freeze | Out-File -Encoding utf8 release\DEPENDENCIES-Windows-x64.txt
+
+      - name: Sign Windows installer
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\release\RHOPlanner-Windows-x64-Setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows signatures
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $files = @(
+            "dist\RHOPlanner\RHOPlanner.exe",
+            "release\RHOPlanner-Windows-x64-Setup.exe"
+          )
+          foreach ($file in $files) {
+            $sig = Get-AuthenticodeSignature $file
+            Write-Host "$file -> $($sig.Status) / $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne 'Valid') { throw "Invalid Authenticode signature: $file" }
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
@@ -92,7 +154,6 @@ jobs:
             arch: x86_64
 
     runs-on: ${{ matrix.runner }}
-
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
 
@@ -110,9 +171,30 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
           else
-            version="dev-${GITHUB_SHA::7}"
+            version="0.0.0-dev-${GITHUB_SHA::7}"
           fi
           echo "RHO_PLANNER_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Verify Apple signing configuration for tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID APPLE_SIGNING_IDENTITY; do
+            if [[ -z "${!name:-}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Tagged releases require Developer ID signing and notarization. Missing: ${missing[*]}"
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -141,41 +223,84 @@ jobs:
         shell: bash
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
 
-      - name: Apply ad-hoc signature and verify bundle
+      - name: Import Developer ID certificate
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/rhoplanner-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)$(uuidgen)"
+          CERT_PATH="$RUNNER_TEMP/rhoplanner-developer-id.p12"
+
+          export CERT_PATH
+          python - <<'PY'
+          import base64, os
+          raw = base64.b64decode(os.environ['APPLE_CERTIFICATE_P12_BASE64'])
+          with open(os.environ['CERT_PATH'], 'wb') as f:
+              f.write(raw)
+          PY
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          echo "MAC_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Sign macOS application with Developer ID
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          codesign --force --deep --options runtime --timestamp             --sign "$APPLE_SIGNING_IDENTITY" dist/RHOPlanner.app
+          codesign --verify --deep --strict --verbose=2 dist/RHOPlanner.app
+
+      - name: Apply ad-hoc signature for manual test build
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
           codesign --force --deep --sign - dist/RHOPlanner.app
           codesign --verify --deep --strict dist/RHOPlanner.app
 
-      - name: Package macOS downloads
+      - name: Notarize and staple macOS application
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          NOTARY_ZIP="$RUNNER_TEMP/RHOPlanner-notary-${{ matrix.arch }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/RHOPlanner.app "$NOTARY_ZIP"
+          xcrun notarytool submit "$NOTARY_ZIP"             --apple-id "$APPLE_ID"             --team-id "$APPLE_TEAM_ID"             --password "$APPLE_APP_SPECIFIC_PASSWORD"             --wait
+          xcrun stapler staple dist/RHOPlanner.app
+          xcrun stapler validate dist/RHOPlanner.app
+          spctl --assess --type execute --verbose=4 dist/RHOPlanner.app
+
+      - name: Package macOS ZIP and DMG
         shell: bash
         run: |
           set -euo pipefail
-
           APP_PATH="dist/RHOPlanner.app"
           ZIP_PATH="release/RHOPlanner-macOS-${{ matrix.arch }}.zip"
           DMG_PATH="release/RHOPlanner-macOS-${{ matrix.arch }}.dmg"
 
-          rm -rf release
           mkdir -p release
+          rm -f "$ZIP_PATH" "$DMG_PATH"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
 
-          # Preserve the macOS application bundle's resource forks and metadata.
-          ditto \
-            -c \
-            -k \
-            --sequesterRsrc \
-            --keepParent \
-            "$APP_PATH" \
-            "$ZIP_PATH"
-
-          # Use a unique temporary directory to reduce hdiutil "Resource busy"
-          # failures on GitHub-hosted macOS runners.
           DMG_ROOT="$(mktemp -d "${RUNNER_TEMP}/rho-planner-dmg.XXXXXX")"
-
           cleanup() {
-            hdiutil detach "/Volumes/RHO Planner" -force \
-              >/dev/null 2>&1 || true
+            hdiutil detach "/Volumes/RHO Planner" -force >/dev/null 2>&1 || true
             rm -rf "$DMG_ROOT"
           }
           trap cleanup EXIT
@@ -183,44 +308,44 @@ jobs:
           ditto "$APP_PATH" "$DMG_ROOT/RHOPlanner.app"
           ln -s /Applications "$DMG_ROOT/Applications"
 
-          hdiutil detach "/Volumes/RHO Planner" -force \
-            >/dev/null 2>&1 || true
-          rm -f "$DMG_PATH"
-          sync
-          sleep 2
-
           created=false
           for attempt in 1 2 3; do
-            echo "Creating DMG - attempt ${attempt}/3"
-
-            if hdiutil create \
-                -ov \
-                -format UDZO \
-                -fs HFS+ \
-                -volname "RHO Planner" \
-                -srcfolder "$DMG_ROOT" \
-                "$DMG_PATH"; then
+            if hdiutil create -ov -format UDZO -fs HFS+ -volname "RHO Planner"                 -srcfolder "$DMG_ROOT" "$DMG_PATH"; then
               created=true
               break
             fi
-
             rm -f "$DMG_PATH"
-            hdiutil detach "/Volumes/RHO Planner" -force \
-              >/dev/null 2>&1 || true
+            hdiutil detach "/Volumes/RHO Planner" -force >/dev/null 2>&1 || true
             sleep $((attempt * 5))
           done
-
-          if [[ "$created" != true ]]; then
-            echo "::error::Unable to create the macOS DMG after three attempts."
-            exit 1
-          fi
-
+          [[ "$created" == true ]] || { echo "::error::Unable to create DMG"; exit 1; }
           hdiutil verify "$DMG_PATH"
-          python -m pip freeze \
-            > "release/DEPENDENCIES-macOS-${{ matrix.arch }}.txt"
+          python -m pip freeze > "release/DEPENDENCIES-macOS-${{ matrix.arch }}.txt"
 
-          echo "Created macOS downloads:"
-          ls -lh "$ZIP_PATH" "$DMG_PATH"
+      - name: Sign, notarize, and staple macOS DMG
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          DMG_PATH="release/RHOPlanner-macOS-${{ matrix.arch }}.dmg"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG_PATH"
+          codesign --verify --verbose=2 "$DMG_PATH"
+          xcrun notarytool submit "$DMG_PATH"             --apple-id "$APPLE_ID"             --team-id "$APPLE_TEAM_ID"             --password "$APPLE_APP_SPECIFIC_PASSWORD"             --wait
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+
+      - name: Remove temporary macOS signing keychain
+        if: always() && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          if [[ -n "${MAC_SIGNING_KEYCHAIN:-}" && -f "$MAC_SIGNING_KEYCHAIN" ]]; then
+            security delete-keychain "$MAC_SIGNING_KEYCHAIN" || true
+          fi
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v7
@@ -247,7 +372,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
           else
-            version="dev-${GITHUB_SHA::7}"
+            version="0.0.0-dev-${GITHUB_SHA::7}"
           fi
           echo "RHO_PLANNER_VERSION=$version" >> "$GITHUB_ENV"
 
@@ -260,62 +385,35 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-
-          docker run --rm \
-            -e RHO_PLANNER_VERSION="$RHO_PLANNER_VERSION" \
-            -v "$PWD:/work" \
-            -w /work \
-            python:3.11-bullseye \
-            bash -lc '
+          docker run --rm             -e RHO_PLANNER_VERSION="$RHO_PLANNER_VERSION"             -v "$PWD:/work"             -w /work             python:3.11-bullseye             bash -lc '
               set -euo pipefail
-
               apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                binutils \
-                patchelf \
-                ca-certificates \
-                curl \
-                file \
-                libglib2.0-0 \
-                libgl1 \
-                libegl1 \
-                libxkbcommon0 \
-                libdbus-1-3 \
-                libfontconfig1 \
-                libx11-6 \
-                libxcb1 \
-                libxext6 \
-                libxrender1 \
-                libxi6 \
-                libxrandr2 \
-                libxfixes3
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends                 binutils patchelf ca-certificates curl file                 libglib2.0-0 libgl1 libegl1 libxkbcommon0 libdbus-1-3                 libfontconfig1 libx11-6 libxcb1 libxext6 libxrender1                 libxi6 libxrandr2 libxfixes3
               rm -rf /var/lib/apt/lists/*
-
-              python -c "import sysconfig; enabled=int(sysconfig.get_config_var(\"Py_ENABLE_SHARED\") or 0); library=sysconfig.get_config_var(\"INSTSONAME\") or sysconfig.get_config_var(\"LDLIBRARY\"); print(f\"Py_ENABLE_SHARED={enabled}\"); print(f\"Python shared library={library}\"); assert enabled == 1, \"The selected Python does not provide a shared libpython.\""
-
               python -m pip install --upgrade pip
               python -m pip install -r requirements.txt -r requirements-build.txt
               python -m PyInstaller --noconfirm --clean RHOPlanner.spec
               python -m pip freeze > release/DEPENDENCIES-Linux-x86_64.txt
             '
-
           sudo chown -R "$USER":"$USER" build dist release
 
-      - name: Smoke test on Ubuntu 20.04
+      - name: Existing Linux smoke tests
         shell: bash
-        run: bash ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
-
-      - name: Smoke test on Linux Mint 22
-        shell: bash
-        run: bash ./build_support/smoke_test_linux_bundle.sh linuxmintd/mint22-amd64
-
-      - name: Smoke test on Arch Linux
-        shell: bash
-        run: bash ./build_support/smoke_test_linux_bundle.sh archlinux:latest
+        run: |
+          bash ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
+          bash ./build_support/smoke_test_linux_bundle.sh linuxmintd/mint22-amd64
+          bash ./build_support/smoke_test_linux_bundle.sh archlinux:latest
 
       - name: Create AppImage and tarball
         shell: bash
         run: bash ./build_support/build_linux_appimage.sh
+
+      - name: Create Debian package
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+          bash ./build_support/build_linux_deb.sh
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
@@ -325,18 +423,15 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    name: Publish GitHub release
+    name: Publish trusted GitHub release
     runs-on: ubuntu-24.04
-
-    permissions:
-      contents: write
-
     if: startsWith(github.ref, 'refs/tags/v')
-
     needs:
       - windows-x64
       - macos
       - linux-x64
+    permissions:
+      contents: write
 
     steps:
       - name: Download all build artifacts
@@ -349,44 +444,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           required_files=(
-            "release/RHOPlanner-Windows-x64.zip"
-            "release/RHOPlanner-Windows-x64.exe"
+            "release/RHOPlanner-Windows-x64-Setup.exe"
             "release/RHOPlanner-macOS-arm64.zip"
             "release/RHOPlanner-macOS-arm64.dmg"
             "release/RHOPlanner-macOS-x86_64.zip"
             "release/RHOPlanner-macOS-x86_64.dmg"
             "release/RHOPlanner-Linux-x86_64.AppImage"
             "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/RHOPlanner-Linux-amd64.deb"
           )
-
           for file in "${required_files[@]}"; do
-            if [[ ! -f "$file" ]]; then
-              echo "::error::Missing required release file: $file"
-              exit 1
-            fi
+            [[ -f "$file" ]] || { echo "::error::Missing required release file: $file"; exit 1; }
           done
-
-          echo "Verified release downloads:"
-          printf '  %s\n' "${required_files[@]}"
 
       - name: Create SHA-256 checksums
         shell: bash
         run: |
           set -euo pipefail
           cd release
-
-          sha256sum \
-            RHOPlanner-Windows-x64.zip \
-            RHOPlanner-Windows-x64.exe \
-            RHOPlanner-macOS-arm64.zip \
-            RHOPlanner-macOS-arm64.dmg \
-            RHOPlanner-macOS-x86_64.zip \
-            RHOPlanner-macOS-x86_64.dmg \
-            RHOPlanner-Linux-x86_64.AppImage \
-            RHOPlanner-Linux-x86_64.tar.gz \
-            > SHA256SUMS.txt
+          sha256sum             RHOPlanner-Windows-x64-Setup.exe             RHOPlanner-macOS-arm64.zip             RHOPlanner-macOS-arm64.dmg             RHOPlanner-macOS-x86_64.zip             RHOPlanner-macOS-x86_64.dmg             RHOPlanner-Linux-x86_64.AppImage             RHOPlanner-Linux-x86_64.tar.gz             RHOPlanner-Linux-amd64.deb             > SHA256SUMS.txt
 
       - name: Create or update GitHub release
         shell: bash
@@ -395,28 +472,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-
           release_files=(
-            "release/RHOPlanner-Windows-x64.zip"
-            "release/RHOPlanner-Windows-x64.exe"
+            "release/RHOPlanner-Windows-x64-Setup.exe"
             "release/RHOPlanner-macOS-arm64.zip"
             "release/RHOPlanner-macOS-arm64.dmg"
             "release/RHOPlanner-macOS-x86_64.zip"
             "release/RHOPlanner-macOS-x86_64.dmg"
             "release/RHOPlanner-Linux-x86_64.AppImage"
             "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/RHOPlanner-Linux-amd64.deb"
             "release/SHA256SUMS.txt"
           )
-
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload \
-              "$GITHUB_REF_NAME" \
-              "${release_files[@]}" \
-              --clobber
+            gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" --clobber
           else
-            gh release create \
-              "$GITHUB_REF_NAME" \
-              "${release_files[@]}" \
-              --title "RHO Planner $GITHUB_REF_NAME" \
-              --generate-notes
+            gh release create "$GITHUB_REF_NAME" "${release_files[@]}"               --title "RHO Planner $GITHUB_REF_NAME"               --generate-notes
           fi
