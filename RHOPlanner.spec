@@ -30,7 +30,7 @@ def _macos_bundle_version(value: str) -> str:
 
 MACOS_BUNDLE_VERSION = _macos_bundle_version(APP_VERSION)
 ICON = icon_for_platform(ROOT, sys.platform)
-DATAS, BINARIES, HIDDENIMPORTS = build_collection()
+DATAS, BINARIES, HIDDENIMPORTS = build_collection()\n\nRUNTIME_HOOKS = [str(ROOT / "build_support" / "rthook_network.py")]\nif sys.platform.startswith("linux"):\n    RUNTIME_HOOKS.append(str(ROOT / "build_support" / "rthook_linux_qt_compat.py"))
 
 analysis = Analysis(
     [str(ROOT / "main.py")],
@@ -40,7 +40,7 @@ analysis = Analysis(
     hiddenimports=HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[str(ROOT / "build_support" / "rthook_network.py")],
+    runtime_hooks=RUNTIME_HOOKS,
     excludes=[
         "PyQt5",
         "PyQt6",
