@@ -29,7 +29,7 @@ def _macos_bundle_version(value: str) -> str:
 
 
 MACOS_BUNDLE_VERSION = _macos_bundle_version(APP_VERSION)
-ICON = icon_for_platform(ROOT, sys.platform)
+ICON = icon_for_platform(ROOT, sys.platform)\nSTRIP_BINARIES = sys.platform.startswith("linux")
 DATAS, BINARIES, HIDDENIMPORTS = build_collection()\n\nRUNTIME_HOOKS = [str(ROOT / "build_support" / "rthook_network.py")]\nif sys.platform.startswith("linux"):\n    RUNTIME_HOOKS.append(str(ROOT / "build_support" / "rthook_linux_qt_compat.py"))
 
 analysis = Analysis(
@@ -66,7 +66,7 @@ exe = EXE(
     name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=STRIP_BINARIES,
     upx=False,
     console=False,
     disable_windowed_traceback=False,
@@ -81,7 +81,7 @@ collection = COLLECT(
     exe,
     analysis.binaries,
     analysis.datas,
-    strip=False,
+    strip=STRIP_BINARIES,
     upx=False,
     upx_exclude=[],
     name=APP_NAME,
