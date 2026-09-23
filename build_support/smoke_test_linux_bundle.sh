@@ -20,8 +20,10 @@ docker run --rm \
       apt-get update -qq
       apt-get install -y -qq \
         ca-certificates coreutils libglib2.0-0 libgl1 libegl1 \
-        libxkbcommon0 libdbus-1-3 libfontconfig1 libx11-6 libxcb1 \
+        libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1 xkb-data \
+        libdbus-1-3 libfontconfig1 libx11-6 libxcb1 \
         libxext6 libxrender1 libxi6 libxrandr2 libxfixes3 \
+        xvfb xauth \
         >/dev/null
       apt-get install -y -qq \
         libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 \
@@ -30,9 +32,10 @@ docker run --rm \
         >/dev/null 2>&1 || true
     elif command -v pacman >/dev/null 2>&1; then
       pacman -Sy --noconfirm --needed \
-        ca-certificates coreutils glib2 mesa libxkbcommon dbus fontconfig \
-        libx11 libxcb libxext libxrender libxi libxrandr libxfixes \
+        ca-certificates coreutils glib2 mesa libxkbcommon xkeyboard-config \
+        dbus fontconfig libx11 libxcb libxext libxrender libxi libxrandr libxfixes \
         xcb-util-cursor xcb-util-keysyms xcb-util-image xcb-util-renderutil \
+        xorg-server-xvfb xorg-xauth \
         >/dev/null
     else
       echo "Unsupported test container package manager" >&2
@@ -47,16 +50,27 @@ docker run --rm \
     fi
 
     set +e
-    QT_QPA_PLATFORM=offscreen timeout 35s /app/RHOPlanner >/tmp/rho.stdout 2>/tmp/rho.stderr
-    code=$?
+    QT_QPA_PLATFORM=offscreen timeout 15s /app/RHOPlanner >/tmp/rho-offscreen.stdout 2>/tmp/rho-offscreen.stderr
+    offscreen_code=$?
     set -e
-    cat /tmp/rho.stdout || true
-    cat /tmp/rho.stderr >&2 || true
+    cat /tmp/rho-offscreen.stdout || true
+    cat /tmp/rho-offscreen.stderr >&2 || true
+    if [[ $offscreen_code -ne 124 ]]; then
+      echo "RHO Planner offscreen startup exited unexpectedly with code $offscreen_code" >&2
+      exit $offscreen_code
+    fi
 
-    # 124 means the GUI remained alive until timeout, which is the expected
-    # outcome for this headless launch test.
-    if [[ $code -ne 124 ]]; then
-      echo "RHO Planner exited unexpectedly with code $code" >&2
-      exit $code
+    # Exercise the actual X11/XCB path.  The Mint 21.3 failure occurred during
+    # xkb_x11_keymap_new_from_device(), which an offscreen test cannot catch.
+    set +e
+    xvfb-run -a -s "-screen 0 1280x800x24" \
+      timeout 15s /app/RHOPlanner >/tmp/rho-x11.stdout 2>/tmp/rho-x11.stderr
+    x11_code=$?
+    set -e
+    cat /tmp/rho-x11.stdout || true
+    cat /tmp/rho-x11.stderr >&2 || true
+    if [[ $x11_code -ne 124 ]]; then
+      echo "RHO Planner X11/XCB startup exited unexpectedly with code $x11_code" >&2
+      exit $x11_code
     fi
   '
