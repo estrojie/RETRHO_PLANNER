@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "build_support"))
 from pyinstaller_config import build_collection, icon_for_platform
 
 DATAS, BINARIES, HIDDENIMPORTS = build_collection()\n\nRUNTIME_HOOKS = [str(ROOT / "build_support" / "rthook_network.py")]\nif sys.platform.startswith("linux"):\n    RUNTIME_HOOKS.append(str(ROOT / "build_support" / "rthook_linux_qt_compat.py"))
-ICON = icon_for_platform(ROOT, sys.platform)
+ICON = icon_for_platform(ROOT, sys.platform)\nSTRIP_BINARIES = sys.platform.startswith("linux")
 
 analysis = Analysis(
     [str(ROOT / "main.py")],
@@ -40,7 +40,7 @@ exe = EXE(
     name="RHOPlanner",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=STRIP_BINARIES,
     upx=False,
     console=False,
     disable_windowed_traceback=False,
