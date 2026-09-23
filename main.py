@@ -2,7 +2,6 @@
 from __future__ import annotations
 import sys
 import re
-import warnings
 from io       import BytesIO
 from dataclasses import dataclass
 from typing   import List, Optional, Tuple
@@ -14,7 +13,6 @@ import pandas as pd
 
 import matplotlib
 matplotlib.use("QtAgg")
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg as FigureCanvas,
     NavigationToolbar2QT as NavigationToolbar,
@@ -35,7 +33,6 @@ from PySide6.QtWidgets import (
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.wcs import WCS
-from astroquery.exceptions import NoResultsWarning
 
 import planner_core as core
 
