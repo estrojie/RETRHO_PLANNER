@@ -9,8 +9,13 @@ sys.path.insert(0, str(ROOT / "build_support"))
 
 from pyinstaller_config import build_collection, icon_for_platform
 
-DATAS, BINARIES, HIDDENIMPORTS = build_collection()\n\nRUNTIME_HOOKS = [str(ROOT / "build_support" / "rthook_network.py")]\nif sys.platform.startswith("linux"):\n    RUNTIME_HOOKS.append(str(ROOT / "build_support" / "rthook_linux_qt_compat.py"))
-ICON = icon_for_platform(ROOT, sys.platform)\nSTRIP_BINARIES = sys.platform.startswith("linux")
+DATAS, BINARIES, HIDDENIMPORTS = build_collection()
+
+RUNTIME_HOOKS = [str(ROOT / "build_support" / "rthook_network.py")]
+if sys.platform.startswith("linux"):
+    RUNTIME_HOOKS.append(str(ROOT / "build_support" / "rthook_linux_qt_compat.py"))
+ICON = icon_for_platform(ROOT, sys.platform)
+STRIP_BINARIES = sys.platform.startswith("linux")
 
 analysis = Analysis(
     [str(ROOT / "main.py")],
