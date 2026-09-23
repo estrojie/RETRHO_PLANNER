@@ -293,6 +293,16 @@ class StarIdWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+class SkyConditionsWorker(QThread):
+    finished = Signal(object)
+    failed   = Signal(str)
+
+    def run(self):
+        try:
+            self.finished.emit(core.sky_conditions())
+        except Exception as e:
+            self.failed.emit(str(e))
+
 class AltitudeInspectorDialog(QDialog):
     def __init__(self, parent, coords, names, min_alt, max_alt):
         super().__init__(parent)
@@ -2085,6 +2095,7 @@ class MainWindow(QMainWindow):
         self.plan:            List[PlanRow] = []
         self._finder_workers: set           = set()
         self._plan_workers:   set           = set()
+        self._sky_worker: SkyConditionsWorker | None = None
         self._finder_request_id             = 0
 
         self._last_coords: list = []
@@ -2118,7 +2129,12 @@ class MainWindow(QMainWindow):
 
         self._bind_altitude_click()
         self._bind_finder_clicks()
+
+        # Apply local defaults immediately, but do not block the first paint on
+        # network/weather work.  Sky conditions are fetched after the window
+        # enters the event loop.
         self.apply_date_location(initial=True)
+        QTimer.singleShot(250, self.refresh_sky)
 
     def _build_left_panel(self) -> QWidget:
         left   = QWidget()
@@ -2442,25 +2458,56 @@ class MainWindow(QMainWindow):
             dlg.refresh_planner_targets(preferred_row=preferred_row)
 
     def refresh_sky(self):
+        # Weather/network requests used to run synchronously on the GUI thread,
+        # which could make startup and location changes look frozen.  Keep one
+        # background request at a time and update the labels when it completes.
+        if self._sky_worker is not None and self._sky_worker.isRunning():
+            return
+
         self.statusBar().showMessage("Refreshing sky conditions…")
-        cond = core.sky_conditions()
+        worker = SkyConditionsWorker(self)
+        self._sky_worker = worker
 
-        sunset = cond.get("sunset_local")
-        self.lbl_sunset.setText(sunset.strftime("%Y-%m-%d %H:%M") if sunset else "unavailable")
+        def _finished(cond):
+            if self._sky_worker is worker:
+                self._sky_worker = None
 
-        moon_alt = cond.get("moon_alt_deg")
-        self.lbl_moon_alt.setText(f"{moon_alt:.1f}°" if moon_alt is not None else "unavailable")
+            sunset = cond.get("sunset_local")
+            self.lbl_sunset.setText(
+                sunset.strftime("%Y-%m-%d %H:%M") if sunset else "unavailable"
+            )
 
-        illum = cond.get("moon_illum_frac")
-        self.lbl_moon_illum.setText(f"{illum*100:.1f}%" if illum is not None else "unavailable")
+            moon_alt = cond.get("moon_alt_deg")
+            self.lbl_moon_alt.setText(
+                f"{moon_alt:.1f}°" if moon_alt is not None else "unavailable"
+            )
 
-        cloud_now = cond.get("cloud_now_pct")
-        self.lbl_cloud_now.setText(f"{cloud_now:.0f}%" if cloud_now is not None else "unavailable")
+            illum = cond.get("moon_illum_frac")
+            self.lbl_moon_illum.setText(
+                f"{illum*100:.1f}%" if illum is not None else "unavailable"
+            )
 
-        cloud_next = cond.get("cloud_next_pct")
-        self.lbl_cloud_next.setText(f"{cloud_next:.0f}%" if cloud_next is not None else "unavailable")
+            cloud_now = cond.get("cloud_now_pct")
+            self.lbl_cloud_now.setText(
+                f"{cloud_now:.0f}%" if cloud_now is not None else "unavailable"
+            )
 
-        self.statusBar().showMessage("Ready")
+            cloud_next = cond.get("cloud_next_pct")
+            self.lbl_cloud_next.setText(
+                f"{cloud_next:.0f}%" if cloud_next is not None else "unavailable"
+            )
+            self.statusBar().showMessage("Ready")
+            worker.deleteLater()
+
+        def _failed(message):
+            if self._sky_worker is worker:
+                self._sky_worker = None
+            self.statusBar().showMessage(f"Sky conditions unavailable: {message}", 5000)
+            worker.deleteLater()
+
+        worker.finished.connect(_finished)
+        worker.failed.connect(_failed)
+        worker.start()
 
     def apply_date_location(self, initial: bool = False):
         try:
@@ -2474,7 +2521,8 @@ class MainWindow(QMainWindow):
             ZoneInfo(tz)   # validate early
             core.set_site(float(self.lat_spin.value()), float(self.lon_spin.value()),
                           float(self.height_spin.value()), tz)
-            self.refresh_sky()
+            if not initial:
+                self.refresh_sky()
 
             if not initial and self.plan:
                 self.plan_observations()
@@ -2804,7 +2852,10 @@ class MainWindow(QMainWindow):
                                           lambda e: self.open_finder_inspector(2))
 
     def closeEvent(self, event):
-        for w in list(self._finder_workers) + list(self._plan_workers):
+        workers = list(self._finder_workers) + list(self._plan_workers)
+        if self._sky_worker is not None:
+            workers.append(self._sky_worker)
+        for w in workers:
             if w.isRunning():
                 w.requestInterruption()
                 w.wait(2000)
