@@ -63,10 +63,11 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Compress-Archive `
-            -Path dist\RHOPlanner `
-            -DestinationPath release\RHOPlanner-Windows-x64.zip `
-            -Force
+          if (Test-Path release\RHOPlanner-Windows-x64.zip) {
+            Remove-Item release\RHOPlanner-Windows-x64.zip -Force
+          }
+          & 7z a -tzip -mx=9 release\RHOPlanner-Windows-x64.zip dist\RHOPlanner | Out-Host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item `
             dist-onefile\RHOPlanner.exe `
             release\RHOPlanner-Windows-x64.exe
@@ -231,7 +232,7 @@ jobs:
 
   linux-x64:
     name: Linux x86_64
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Check out repository
@@ -280,6 +281,15 @@ jobs:
                 libgl1 \
                 libegl1 \
                 libxkbcommon0 \
+                libxkbcommon-x11-0 \
+                libxcb-xkb1 \
+                xkb-data \
+                libxcb-cursor0 \
+                libxcb-icccm4 \
+                libxcb-keysyms1 \
+                libxcb-image0 \
+                libxcb-render-util0 \
+                libxcb-xinerama0 \
                 libdbus-1-3 \
                 libfontconfig1 \
                 libx11-6 \
@@ -304,6 +314,10 @@ jobs:
       - name: Smoke test on Ubuntu 20.04
         shell: bash
         run: bash ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
+
+      - name: Smoke test on Ubuntu 22.04
+        shell: bash
+        run: bash ./build_support/smoke_test_linux_bundle.sh ubuntu:22.04
 
       - name: Smoke test on Linux Mint 22
         shell: bash
@@ -358,7 +372,7 @@ jobs:
             "release/RHOPlanner-macOS-x86_64.zip"
             "release/RHOPlanner-macOS-x86_64.dmg"
             "release/RHOPlanner-Linux-x86_64.AppImage"
-            "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/RHOPlanner-Linux-x86_64.tar.xz"
           )
 
           for file in "${required_files[@]}"; do
@@ -385,7 +399,7 @@ jobs:
             RHOPlanner-macOS-x86_64.zip \
             RHOPlanner-macOS-x86_64.dmg \
             RHOPlanner-Linux-x86_64.AppImage \
-            RHOPlanner-Linux-x86_64.tar.gz \
+            RHOPlanner-Linux-x86_64.tar.xz \
             > SHA256SUMS.txt
 
       - name: Create or update GitHub release
@@ -404,7 +418,7 @@ jobs:
             "release/RHOPlanner-macOS-x86_64.zip"
             "release/RHOPlanner-macOS-x86_64.dmg"
             "release/RHOPlanner-Linux-x86_64.AppImage"
-            "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/RHOPlanner-Linux-x86_64.tar.xz"
             "release/SHA256SUMS.txt"
           )
 
