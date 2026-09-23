@@ -28,7 +28,12 @@ analysis = Analysis(
     runtime_hooks=RUNTIME_HOOKS,
     excludes=[
         "PyQt5", "PyQt6", "PySide2", "tkinter", "IPython",
-        "jupyter", "notebook", "pytest", "sphinx",
+        "jupyter", "notebook", "pytest", "sphinx", "scipy",
+        "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
+        "PySide6.QtWebEngineQuick", "PySide6.QtQuick", "PySide6.QtQml",
+        "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
+        "PySide6.QtPdf", "PySide6.QtPdfWidgets",
+        "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.Qt3DExtras",
     ],
     noarchive=False,
     optimize=1,
