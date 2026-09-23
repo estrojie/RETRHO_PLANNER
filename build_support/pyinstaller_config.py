@@ -16,14 +16,13 @@ def _extend_unique(target: list, values: list) -> None:
 
 
 def build_collection() -> Tuple[List[tuple], List[tuple], List[str]]:
-    """Return conservative data, binary, and hidden-import collections.
+    """Return a targeted PyInstaller collection for RHO Planner.
 
-    PyInstaller already has strong hooks for NumPy, SciPy, pandas, Matplotlib,
-    Astropy, Pillow, and PySide6. The additions here cover package metadata,
-    astronomy data files, timezone/certificate data, Excel support, and the
-    astroquery services used dynamically by RHO Planner. PyVO is included
-    explicitly because astroquery imports it for VO/TAP support, and PyVO's
-    SAMP package reads bundled package data during import.
+    PyInstaller's standard hooks already handle the large compiled stacks
+    (NumPy, pandas, Matplotlib, Astropy, Pillow, and PySide6).  Avoid collecting
+    whole package trees again: that increases archive size and import scanning.
+    Only package data and dynamic imports that RHO Planner actually relies on
+    are added here.
     """
     datas: List[tuple] = []
     binaries: List[tuple] = []
@@ -40,18 +39,18 @@ def build_collection() -> Tuple[List[tuple], List[tuple], List[str]]:
         "astroquery.utils",
         "astroquery.query",
         "astroplan",
+        "pyvo",
     ]
 
+    # These packages read runtime data files that are not always discoverable
+    # from static imports.  Keep the set intentionally small.
     for package in (
-        "astropy",
         "astropy_iers_data",
         "astroquery",
         "pyvo",
         "astroplan",
-        "matplotlib",
         "certifi",
         "tzdata",
-        "openpyxl",
     ):
         try:
             _extend_unique(datas, collect_data_files(package, include_py_files=False))
@@ -62,12 +61,11 @@ def build_collection() -> Tuple[List[tuple], List[tuple], List[str]]:
         except Exception:
             pass
 
-    for package in ("astroquery", "astroplan", "openpyxl"):
+    # Metadata is useful for engines selected dynamically at runtime, without
+    # pulling every module in those packages into the executable.
+    for package in ("openpyxl", "matplotlib", "astropy"):
         try:
-            _extend_unique(
-                hiddenimports,
-                collect_submodules(package, on_error="warn once"),
-            )
+            _extend_unique(datas, copy_metadata(package))
         except Exception:
             pass
 
