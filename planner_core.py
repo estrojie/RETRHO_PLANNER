@@ -7,19 +7,6 @@ from zoneinfo import ZoneInfo
 import re
 import math
 
-from astroquery.skyview import SkyView
-import inspect
-
-if "grid" not in inspect.signature(SkyView.get_images).parameters:
-    _orig_get_images = SkyView.get_images
-
-    def _get_images_no_grid(*args, **kwargs):
-        kwargs.pop("grid", None)
-        return _orig_get_images(*args, **kwargs)
-
-    SkyView.get_images = _get_images_no_grid
-
-
 import numpy as np
 import pandas as pd
 import requests
@@ -35,12 +22,9 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.io import fits
 from io import BytesIO, StringIO
 from astroplan import Observer, FixedTarget
-from astroquery.simbad import Simbad
-from astroquery.vizier import Vizier
-from PIL import Image
-from scipy.ndimage import map_coordinates
-
-iers.conf.auto_download = True
+# RHO Planner ships astropy-iers-data, so use the bundled table at startup.
+# This avoids first-run network downloads delaying the GUI by several seconds.
+iers.conf.auto_download = False
 
 DEFAULT_LAT          = 29.400041
 DEFAULT_LON          = -82.585953
@@ -63,12 +47,54 @@ NWS_HEADERS = {
     "Accept": "application/geo+json,application/json",
 }
 
-custom_simbad = Simbad()
+_custom_simbad = None
+_vizier_client = None
+_skyview_class = None
 
-try:
-    custom_simbad.add_votable_fields("flux(V)")
-except Exception:
-    pass
+
+def _get_simbad():
+    """Create the SIMBAD client only when a catalogue lookup is requested."""
+    global _custom_simbad
+    if _custom_simbad is None:
+        from astroquery.simbad import Simbad
+
+        client = Simbad()
+        try:
+            client.add_votable_fields("flux(V)")
+        except Exception:
+            pass
+        _custom_simbad = client
+    return _custom_simbad
+
+
+def _get_vizier_client():
+    """Create the VizieR client only when the finder inspector needs it."""
+    global _vizier_client
+    if _vizier_client is None:
+        from astroquery.vizier import Vizier
+
+        _vizier_client = Vizier(columns=["*"], row_limit=200)
+    return _vizier_client
+
+
+def _get_skyview_class():
+    """Import and compatibility-patch SkyView on first finder-chart request."""
+    global _skyview_class
+    if _skyview_class is None:
+        import inspect
+        from astroquery.skyview import SkyView
+
+        if "grid" not in inspect.signature(SkyView.get_images).parameters:
+            original_get_images = SkyView.get_images
+
+            def _get_images_no_grid(*args, **kwargs):
+                kwargs.pop("grid", None)
+                return original_get_images(*args, **kwargs)
+
+            SkyView.get_images = _get_images_no_grid
+
+        _skyview_class = SkyView
+    return _skyview_class
 
 def _normalize_to_uint8(data: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
     arr = np.asarray(data, dtype=float)
@@ -142,13 +168,36 @@ def _reproject_to_output_wcs(
     xin = np.asarray(xin, dtype=float)
     yin = np.asarray(yin, dtype=float)
 
+    # Bilinear sampling implemented with NumPy.  This replaces the single
+    # scipy.ndimage.map_coordinates use in the application, removing SciPy from
+    # the desktop bundle while preserving smooth finder-chart reprojection.
     fv = float(fill_value) if np.isfinite(fill_value) else 0.0
-    sampled = map_coordinates(arr, [yin, xin], order=1, mode="constant", cval=fv, prefilter=True)
-    sampled = np.asarray(sampled, dtype=float)
-
     invalid = (~np.isfinite(xin)) | (~np.isfinite(yin)) | \
               (xin < -0.5) | (yin < -0.5) | \
               (xin > (arr.shape[1] - 0.5)) | (yin > (arr.shape[0] - 0.5))
+
+    safe_x = np.where(np.isfinite(xin), xin, 0.0)
+    safe_y = np.where(np.isfinite(yin), yin, 0.0)
+    x0 = np.floor(safe_x).astype(np.int64)
+    y0 = np.floor(safe_y).astype(np.int64)
+    dx = safe_x - x0
+    dy = safe_y - y0
+
+    # A one-pixel constant border reproduces map_coordinates(mode="constant")
+    # near the image edge without an additional compiled dependency.
+    padded = np.pad(arr, 1, mode="constant", constant_values=fv)
+    x0p = np.clip(x0 + 1, 0, padded.shape[1] - 1)
+    y0p = np.clip(y0 + 1, 0, padded.shape[0] - 1)
+    x1p = np.clip(x0p + 1, 0, padded.shape[1] - 1)
+    y1p = np.clip(y0p + 1, 0, padded.shape[0] - 1)
+
+    sampled = (
+        padded[y0p, x0p] * (1.0 - dx) * (1.0 - dy)
+        + padded[y0p, x1p] * dx * (1.0 - dy)
+        + padded[y1p, x0p] * (1.0 - dx) * dy
+        + padded[y1p, x1p] * dx * dy
+    )
+    sampled = np.asarray(sampled, dtype=float)
     sampled[invalid] = np.nan
     return sampled
 
@@ -321,7 +370,7 @@ def resolve_target(name: str, ra: str, dec: str) -> ResolvedTarget:
             coord = SkyCoord.from_name(name)
             vmag  = "N/A"
             try:
-                result = custom_simbad.query_object(name)
+                result = _get_simbad().query_object(name)
                 if result is not None:
                     for col_try in ("FLUX_V", "V", "flux(V)", "flux_V"):
                         if col_try in result.colnames:
@@ -526,7 +575,7 @@ def plot_altitudes(
 def _get_skyview_hdu(coord: SkyCoord, fov_arcmin: int, pixels: int, surveys: List[str]):
     for survey in surveys:
         try:
-            hdus = SkyView.get_images(
+            hdus = _get_skyview_class().get_images(
                 position = coord,
                 survey   = [survey],
                 height   = fov_arcmin * u.arcmin,
@@ -820,8 +869,6 @@ def finder_figure(
     return render_finder_figure_from_data(coord, name, data, wcs, fov_w_arcmin, label,
                                           roll_deg, fov_h_arcmin=fov_h_arcmin)
 
-_vizier_client = Vizier(columns=["*"], row_limit=200)
-
 def _catalog_text(value: Any) -> str:
     if value is None:
         return ""
@@ -977,7 +1024,7 @@ def identify_star_at_coord(
     candidates: List[Dict[str, Any]] = []
 
     try:
-        tables = _vizier_client.query_region(click, radius=rad, catalog="I/355/gaiadr3")
+        tables = _get_vizier_client().query_region(click, radius=rad, catalog="I/355/gaiadr3")
         if tables and len(tables) > 0:
             tbl = tables[0]
             for row in tbl:
@@ -997,7 +1044,7 @@ def identify_star_at_coord(
         pass
 
     try:
-        tables = _vizier_client.query_region(click, radius=rad, catalog="I/259/tyc2")
+        tables = _get_vizier_client().query_region(click, radius=rad, catalog="I/259/tyc2")
         if tables and len(tables) > 0:
             tbl = tables[0]
             for row in tbl:
