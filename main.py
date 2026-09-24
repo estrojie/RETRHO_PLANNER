@@ -1566,11 +1566,34 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_ref_band = QComboBox()
         self._populate_reference_bands()
         self._set_reference_band("Johnson V")
+
+        self.etc_use_color = QCheckBox("Use optional color")
+        self.etc_color_mag = self._dspin(-10.0, 40.0, 12.0, 3, " mag")
+        self.etc_color_band = QComboBox()
+        self._populate_reference_bands_into(self.etc_color_band)
+        self._set_reference_band_on(self.etc_color_band, "Gaia RP")
+        self.etc_color_mag.setEnabled(False)
+        self.etc_color_band.setEnabled(False)
+        self.etc_use_color.toggled.connect(self._sync_optional_color_controls)
         self.etc_ref_band.setToolTip(
             "Johnson/Cousins and Gaia DR3 catalogue magnitudes are interpreted "
             "in their Vega systems. Sloan and listed narrowband magnitudes are "
             "interpreted as AB magnitudes."
         )
+
+        self.etc_source_geometry = QComboBox()
+        self.etc_source_geometry.addItem("Point / compact source", "point")
+        self.etc_source_geometry.addItem("Extended / diffuse source", "extended")
+        self.etc_source_geometry.currentIndexChanged.connect(
+            self._sync_source_geometry_controls
+        )
+
+        self.etc_surface_area = self._dspin(0.1, 1.0e9, 100.0, 1, " arcsec²")
+        self.etc_surface_area.setToolTip(
+            "Measurement aperture area for an extended/diffuse source. "
+            "The magnitude above is interpreted as surface brightness in mag/arcsec²."
+        )
+        self.etc_surface_area.setEnabled(False)
 
         self.etc_binning = QComboBox()
         for b in (1, 2, 3):
@@ -1628,10 +1651,26 @@ class ExposureCalculatorDialog(QDialog):
         target_grid.addWidget(self.etc_ref_band, 2, 3)
         target_grid.addWidget(QLabel("Binning:"), 2, 4)
         target_grid.addWidget(self.etc_binning, 2, 5)
-        target_grid.addWidget(QLabel("Desired S/N:"), 3, 0)
-        target_grid.addWidget(self.etc_snr, 3, 1)
-        target_grid.addWidget(QLabel("Peak-count target:"), 3, 2)
-        target_grid.addWidget(peak_counts_widget, 3, 3, 1, 3)
+
+        target_grid.addWidget(QLabel("Source geometry:"), 3, 0)
+        target_grid.addWidget(self.etc_source_geometry, 3, 1, 1, 2)
+        target_grid.addWidget(QLabel("Area:"), 3, 3)
+        target_grid.addWidget(self.etc_surface_area, 3, 4, 1, 2)
+
+        color_row = QWidget()
+        color_l = QHBoxLayout(color_row)
+        color_l.setContentsMargins(0, 0, 0, 0)
+        color_l.setSpacing(8)
+        color_l.addWidget(self.etc_use_color)
+        color_l.addWidget(self.etc_color_mag)
+        color_l.addWidget(self.etc_color_band, 1)
+        target_grid.addWidget(QLabel("Color constraint:"), 4, 0)
+        target_grid.addWidget(color_row, 4, 1, 1, 5)
+
+        target_grid.addWidget(QLabel("Desired S/N:"), 5, 0)
+        target_grid.addWidget(self.etc_snr, 5, 1)
+        target_grid.addWidget(QLabel("Peak-count target:"), 5, 2)
+        target_grid.addWidget(peak_counts_widget, 5, 3, 1, 3)
         target_grid.setColumnStretch(1, 1)
         target_grid.setColumnStretch(3, 2)
         target_grid.setColumnStretch(5, 1)
@@ -1707,6 +1746,8 @@ class ExposureCalculatorDialog(QDialog):
         self.set_target(target_name, target_vmag)
         self._sync_profile_controls()
         self._sync_spectrum_controls()
+        self._sync_optional_color_controls()
+        self._sync_source_geometry_controls()
         self._sync_peak_counts_control()
         self._set_technical_columns(False)
         configure_interactive_widgets(self)
@@ -1716,13 +1757,17 @@ class ExposureCalculatorDialog(QDialog):
         fit_window_to_screen(self, 1080, 760, min_w=680, min_h=500)
 
     def _populate_reference_bands(self):
+        self._populate_reference_bands_into(self.etc_ref_band)
+
+    @staticmethod
+    def _populate_reference_bands_into(combo: QComboBox):
         first_group = True
         for _family, band_specs in core.reference_magnitude_band_groups():
             if not first_group:
-                self.etc_ref_band.insertSeparator(self.etc_ref_band.count())
+                combo.insertSeparator(combo.count())
             first_group = False
             for spec in band_specs:
-                self.etc_ref_band.addItem(spec.display_name, spec.key)
+                combo.addItem(spec.display_name, spec.key)
 
     @staticmethod
     def _scrollable(widget: QWidget) -> QScrollArea:
@@ -1919,13 +1964,36 @@ class ExposureCalculatorDialog(QDialog):
         return f"{x:,.0f} ADU"
 
     def _set_reference_band(self, band_name: str):
+        self._set_reference_band_on(self.etc_ref_band, band_name)
+
+    @staticmethod
+    def _set_reference_band_on(combo: QComboBox, band_name: str):
         try:
             canonical = core.get_reference_magnitude_band(band_name).key
         except Exception:
             canonical = "Johnson V"
-        idx = self.etc_ref_band.findData(canonical)
+        idx = combo.findData(canonical)
         if idx >= 0:
-            self.etc_ref_band.setCurrentIndex(idx)
+            combo.setCurrentIndex(idx)
+
+    def _sync_optional_color_controls(self):
+        enabled = bool(self.etc_use_color.isChecked())
+        self.etc_color_mag.setEnabled(enabled)
+        self.etc_color_band.setEnabled(enabled)
+
+    def _sync_source_geometry_controls(self):
+        extended = self.etc_source_geometry.currentData() == "extended"
+        self.etc_surface_area.setEnabled(extended)
+        if extended:
+            self.etc_ref_mag.setSuffix(" mag/arcsec²")
+            self.etc_ref_mag.setToolTip(
+                "Surface brightness in the selected input band."
+            )
+        else:
+            self.etc_ref_mag.setSuffix(" mag")
+            self.etc_ref_mag.setToolTip(
+                "Integrated/catalog magnitude in the selected input band."
+            )
 
     def _sync_profile_controls(self):
         if not hasattr(self, "etc_profile"):
@@ -2163,6 +2231,19 @@ class ExposureCalculatorDialog(QDialog):
             target_snr=snr,
             airmass=airmass,
             line_fluxes_erg_s_cm2=line_fluxes,
+            second_reference_mag=(
+                float(self.etc_color_mag.value())
+                if self.etc_use_color.isChecked() else None
+            ),
+            second_reference_band=(
+                str(self.etc_color_band.currentData() or "")
+                if self.etc_use_color.isChecked() else None
+            ),
+            source_type=str(self.etc_source_geometry.currentData() or "point"),
+            measurement_area_arcsec2=(
+                float(self.etc_surface_area.value())
+                if self.etc_source_geometry.currentData() == "extended" else None
+            ),
         )
         return cfg, target, mode_desc
 
@@ -2176,9 +2257,22 @@ class ExposureCalculatorDialog(QDialog):
                 if cfg.desired_peak_counts_adu is not None
                 else " · no peak-count target"
             )
+            source_desc = (
+                f"surface brightness {self.etc_ref_mag.value():.3f} mag/arcsec² "
+                f"over {target.measurement_area_arcsec2:g} arcsec²"
+                if target.source_type == "extended"
+                else f"input {self.etc_ref_mag.value():.3f} mag"
+            )
+            color_desc = ""
+            if target.second_reference_mag is not None and target.second_reference_band:
+                color_band = core.get_reference_magnitude_band(target.second_reference_band)
+                color_desc = (
+                    f" · color: {target.second_reference_mag:.3f} mag "
+                    f"in {color_band.display_name}"
+                )
             self.etc_summary.setText(
-                f"{mode_desc} · input: {self.etc_ref_mag.value():.3f} mag in "
-                f"{band.display_name} · S/N target: {target.target_snr:g}{count_text}"
+                f"{mode_desc} · {source_desc} in {band.display_name}"
+                f"{color_desc} · S/N target: {target.target_snr:g}{count_text}"
             )
             self._populate_results()
         except Exception as exc:
