@@ -9,6 +9,43 @@ from astropy.wcs import WCS
 import planner_core as core
 
 
+class PlanningRegressionTests(unittest.TestCase):
+    def test_explicit_coordinates_never_require_online_name_resolution(self):
+        with patch.object(
+            core.SkyCoord, "from_name",
+            side_effect=AssertionError("online name lookup should not be used"),
+        ):
+            resolved = core.resolve_target(
+                "Copernicus", "08:52:35.8", "+28:19:51", lookup_photometry=False
+            )
+        self.assertEqual(resolved.method, "Manual RA/Dec")
+        self.assertAlmostEqual(resolved.coord.ra.deg, 133.149, places=2)
+
+    def test_import_cleanup_does_not_turn_blanks_into_nan_targets(self):
+        import tempfile
+        import pandas as pd
+
+        df = pd.DataFrame({
+            "name": ["Target A", None],
+            "ra": ["10:00:00", "11:00:00"],
+            "dec": ["+20:00:00", "+21:00:00"],
+            "priority": [1, 99],
+        })
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as handle:
+            path = handle.name
+        try:
+            df.to_csv(path, index=False)
+            loaded = core.load_targets_from_file(path)
+            self.assertEqual(loaded.loc[1, "name"], "")
+            self.assertEqual(int(loaded.loc[1, "priority"]), 5)
+        finally:
+            import os
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 class ExposureRegressionTests(unittest.TestCase):
     def test_same_band_color_is_rejected(self):
         ok, reason = core.color_constraint_status("Sloan g", "Sloan g", "r")
