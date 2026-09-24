@@ -20,14 +20,14 @@ from matplotlib.backends.backend_qtagg import (
 from matplotlib.patches import Rectangle
 
 from PySide6.QtCore    import Qt, QThread, Signal, QDate, QSize, QTimer, QSignalBlocker
-from PySide6.QtGui     import QTextDocument, QFont, QImage, QPixmap, QGuiApplication
+from PySide6.QtGui     import QTextDocument, QFont, QFontDatabase, QImage, QPixmap, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QGroupBox, QFormLayout, QLabel, QPushButton, QTabWidget, QFileDialog,
     QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QSpinBox,
     QAbstractItemView, QComboBox, QDoubleSpinBox, QDateEdit, QDialog,
     QListWidget, QListWidgetItem, QCheckBox, QSizePolicy, QHeaderView,
-    QStyle, QScrollArea, QGridLayout,
+    QStyle, QScrollArea, QGridLayout, QAbstractSpinBox,
 )
 
 from astropy.coordinates import SkyCoord
@@ -52,6 +52,56 @@ def style_toolbar_button(btn: QPushButton):
         pass
 
 
+def style_primary_button(btn: QPushButton):
+    """Mark a high-value action with a stronger hover/focus treatment."""
+    btn.setProperty("primaryButton", True)
+    btn.setCursor(Qt.PointingHandCursor)
+    try:
+        btn.style().unpolish(btn); btn.style().polish(btn)
+    except Exception:
+        pass
+
+
+def fit_window_to_screen(widget: QWidget, preferred_w: int, preferred_h: int,
+                         min_w: int = 760, min_h: int = 520):
+    """Fit a window to the available display without hard-coding a large minimum."""
+    try:
+        screen = widget.screen() or QGuiApplication.primaryScreen()
+        geom = screen.availableGeometry() if screen is not None else None
+        if geom is not None:
+            max_w = max(640, int(geom.width() * 0.96))
+            max_h = max(480, int(geom.height() * 0.94))
+            widget.setMinimumSize(
+                min(int(min_w), max(640, int(max_w * 0.82))),
+                min(int(min_h), max(480, int(max_h * 0.78))),
+            )
+            widget.resize(min(int(preferred_w), max_w), min(int(preferred_h), max_h))
+            return
+    except Exception:
+        pass
+    widget.setMinimumSize(min_w, min_h)
+    widget.resize(preferred_w, preferred_h)
+
+
+def configure_interactive_widgets(root: QWidget):
+    """Normalize controls across macOS/Windows/Linux and expose clickable affordances."""
+    for btn in root.findChildren(QPushButton):
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumHeight(max(30, btn.minimumHeight()))
+
+    for spin in root.findChildren(QAbstractSpinBox):
+        spin.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        spin.setMinimumHeight(max(30, spin.minimumHeight()))
+        spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    for edit in root.findChildren(QLineEdit):
+        edit.setMinimumHeight(max(30, edit.minimumHeight()))
+        edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    for combo in root.findChildren(QComboBox):
+        combo.setMinimumHeight(max(30, combo.minimumHeight()))
+
+
 def copy_figure_to_clipboard(fig, parent=None, msg: str = "Plot copied to clipboard."):
     try:
         buf   = BytesIO()
@@ -66,7 +116,21 @@ def copy_figure_to_clipboard(fig, parent=None, msg: str = "Plot copied to clipbo
         QMessageBox.warning(parent, "Clipboard Error", f"Could not copy plot.\n\n{e}")
 
 def apply_app_style(app: QApplication):
-    app.setFont(QFont("Segoe UI", 10))
+    # Fusion behaves consistently across platforms; in particular it prevents
+    # macOS native spin boxes/form controls from collapsing under a custom QSS.
+    try:
+        app.setStyle("Fusion")
+    except Exception:
+        pass
+
+    try:
+        if sys.platform == "win32":
+            app.setFont(QFont("Segoe UI", 10))
+        else:
+            app.setFont(QFontDatabase.systemFont(QFontDatabase.GeneralFont))
+    except Exception:
+        pass
+
     app.setStyleSheet("""
     QMainWindow {
         background-color: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1f2228,stop:1 #181a1f);
@@ -77,10 +141,28 @@ def apply_app_style(app: QApplication):
         padding:10px; font-weight:600; color:#d0d0d0;
         background-color:rgba(21,23,28,0.55);
     }
-    QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px; color:#cfcfcf; }
+    QGroupBox::title {
+        subcontrol-origin:margin; subcontrol-position:top left;
+        left:12px; padding:0 6px; color:#cfcfcf;
+    }
     QLineEdit, QSpinBox, QDoubleSpinBox, QDateEdit, QComboBox {
         background-color:#14161b; border:1px solid #3a3d45; border-radius:6px;
-        padding:5px; color:#e5e5e5; selection-background-color:#2b6cb0;
+        padding:5px 7px; min-height:22px; color:#e5e5e5;
+        selection-background-color:#2b6cb0;
+    }
+    QSpinBox, QDoubleSpinBox { padding-right:25px; }
+    QSpinBox::up-button, QDoubleSpinBox::up-button {
+        subcontrol-origin:border; subcontrol-position:top right;
+        width:22px; border-left:1px solid #3a3d45; border-bottom:1px solid #3a3d45;
+        background:#30343d;
+    }
+    QSpinBox::down-button, QDoubleSpinBox::down-button {
+        subcontrol-origin:border; subcontrol-position:bottom right;
+        width:22px; border-left:1px solid #3a3d45; background:#30343d;
+    }
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+    QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+        background:#3b5576;
     }
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus,
     QDateEdit:focus, QComboBox:focus { border:1px solid #4a90e2; }
@@ -88,8 +170,16 @@ def apply_app_style(app: QApplication):
         background-color:#2a2d33; border:1px solid #3a3d45;
         padding:7px 10px; border-radius:6px; color:#f0f0f0;
     }
-    QPushButton:hover { background-color:#353944; }
-    QPushButton:pressed { background-color:#4b5060; }
+    QPushButton:hover {
+        background-color:#353f50; border:1px solid #5a8fd8;
+    }
+    QPushButton:pressed { background-color:#244d7a; border:1px solid #79aef0; }
+    QPushButton[primaryButton="true"] {
+        background-color:#24476d; border:1px solid #4a78a8; font-weight:600;
+    }
+    QPushButton[primaryButton="true"]:hover {
+        background-color:#2c6395; border:1px solid #79b8ff; color:#ffffff;
+    }
     QPushButton[toolbarButton="true"] {
         background-color:#262b34; border:1px solid #41506a; padding:7px 12px;
     }
