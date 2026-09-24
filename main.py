@@ -1492,27 +1492,39 @@ class FinderInspectorDialog(QDialog):
         new_fov_h = int(self.fov_h_spin.value())
         new_roll = float(self.roll_spin.value())
 
-        try: self.parent_window.in_roll.setValue(new_roll)
-        except Exception: pass
+        try:
+            roll_blocker = QSignalBlocker(self.parent_window.in_roll)
+            self.parent_window.in_roll.setValue(new_roll)
+            del roll_blocker
+        except Exception:
+            pass
 
-        if self.which_fov == 1:
-            try:
+        try:
+            if self.which_fov == 1:
+                bw = QSignalBlocker(self.parent_window.in_fov1)
+                bh = QSignalBlocker(self.parent_window.in_fov1_h)
                 self.parent_window.in_fov1.setValue(new_fov_w)
                 self.parent_window.in_fov1_h.setValue(new_fov_h)
-            except Exception:
-                pass
-        else:
-            try:
+            else:
+                bw = QSignalBlocker(self.parent_window.in_fov2)
+                bh = QSignalBlocker(self.parent_window.in_fov2_h)
                 self.parent_window.in_fov2.setValue(new_fov_w)
                 self.parent_window.in_fov2_h.setValue(new_fov_h)
-            except Exception:
-                pass
+            del bw, bh
+            self.parent_window._finder_fov_debounce.stop()
+        except Exception:
+            pass
 
         self.parent_window._open_finder_dialog_request = self
         self.parent_window.on_row_selected()
 
     def closeEvent(self, event):
         self._roll_timer.stop()
+        try:
+            if self.parent_window._open_finder_dialog_request is self:
+                self.parent_window._open_finder_dialog_request = None
+        except Exception:
+            pass
         for worker in list(self._id_workers):
             stop_worker_for_exit(worker)
         self._id_workers.clear()
