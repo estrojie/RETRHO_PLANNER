@@ -182,6 +182,13 @@ def apply_app_style(app: QApplication):
     }
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus,
     QDateEdit:focus, QComboBox:focus { border:1px solid #4a90e2; }
+    QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
+    QDateEdit:disabled, QComboBox:disabled {
+        background-color:#202329;
+        border:1px solid #2d3139;
+        color:#707784;
+    }
+    QCheckBox:disabled, QLabel:disabled { color:#707784; }
     QPushButton {
         background-color:#2a2d33; border:1px solid #3a3d45;
         padding:7px 10px; border-radius:6px; color:#f0f0f0;
@@ -882,9 +889,11 @@ class FinderInspectorDialog(QDialog):
         btns_l.addWidget(btn_rm); btns_l.addWidget(btn_clr)
         right_l.addWidget(btns)
 
+        right.setMinimumWidth(250)
+        right.setMaximumWidth(360)
         root.addWidget(left,  1)
         root.addWidget(right, 0)
-        root.setStretch(0, 4)
+        root.setStretch(0, 5)
         root.setStretch(1, 1)
 
         configure_interactive_widgets(self)
@@ -2652,8 +2661,8 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_center_panel())
         splitter.addWidget(self._build_right_panel())
 
-        QTimer.singleShot(0, lambda: splitter.setSizes([330, 840, 520]))
-        QTimer.singleShot(0, lambda: self._right_split.setSizes([420, 620]))
+        QTimer.singleShot(0, lambda: splitter.setSizes([360, 790, 500]))
+        QTimer.singleShot(0, lambda: self._right_split.setSizes([360, 540]))
 
         self._bind_altitude_click()
         self._bind_finder_clicks()
@@ -2944,7 +2953,12 @@ class MainWindow(QMainWindow):
         alt_btn_row_l.addStretch(1)
         alt_l.addWidget(alt_btn_row)
 
-        self.alt_canvas = FigureCanvas(core.plt.figure(figsize=(7.8, 4.9)))
+        self.alt_canvas = FigureCanvas(
+            core.placeholder_figure(
+                "Altitude plot will appear after observations are planned.",
+                figsize=(7.8, 4.9),
+            )
+        )
         alt_l.addWidget(self.alt_canvas, 1)
         self._right_split.addWidget(alt_container)
 
@@ -2993,8 +3007,18 @@ class MainWindow(QMainWindow):
         finder_l.addWidget(finder_btn_row)
 
         self.finder_tabs     = QTabWidget()
-        self.finder_canvas_1 = FigureCanvas(core.plt.figure(figsize=(7.8, 6.3)))
-        self.finder_canvas_2 = FigureCanvas(core.plt.figure(figsize=(7.8, 6.3)))
+        self.finder_canvas_1 = FigureCanvas(
+            core.placeholder_figure(
+                "Select a planned target to generate Finder FOV1.",
+                figsize=(7.8, 6.3),
+            )
+        )
+        self.finder_canvas_2 = FigureCanvas(
+            core.placeholder_figure(
+                "Select a planned target to generate Finder FOV2.",
+                figsize=(7.8, 6.3),
+            )
+        )
         self.finder_tabs.addTab(self.finder_canvas_1, "FOV1")
         self.finder_tabs.addTab(self.finder_canvas_2, "FOV2")
         finder_l.addWidget(self.finder_tabs, 1)
@@ -3207,9 +3231,22 @@ class MainWindow(QMainWindow):
         self._selected_row = None
         self._raw_finder  = {}
         self._refresh_open_exposure_targets()
-        self._set_altitude_fig(core.plt.figure(figsize=(7.8, 4.9)))
-        self._set_finder_figs(core.plt.figure(figsize=(7.8, 6.3)),
-                              core.plt.figure(figsize=(7.8, 6.3)))
+        self._set_altitude_fig(
+            core.placeholder_figure(
+                "Altitude plot will appear after observations are planned.",
+                figsize=(7.8, 4.9),
+            )
+        )
+        self._set_finder_figs(
+            core.placeholder_figure(
+                "Select a planned target to generate Finder FOV1.",
+                figsize=(7.8, 6.3),
+            ),
+            core.placeholder_figure(
+                "Select a planned target to generate Finder FOV2.",
+                figsize=(7.8, 6.3),
+            ),
+        )
         self.statusBar().showMessage("Plan cleared.")
 
     def remove_selected(self):
@@ -3238,9 +3275,22 @@ class MainWindow(QMainWindow):
         if not self.plan:
             self._last_coords = []; self._last_names = []
             self._raw_finder  = {}
-            self._set_altitude_fig(core.plt.figure(figsize=(7.8, 4.9)))
-            self._set_finder_figs(core.plt.figure(figsize=(7.8, 6.3)),
-                                  core.plt.figure(figsize=(7.8, 6.3)))
+            self._set_altitude_fig(
+                core.placeholder_figure(
+                    "Altitude plot will appear after observations are planned.",
+                    figsize=(7.8, 4.9),
+                )
+            )
+            self._set_finder_figs(
+                core.placeholder_figure(
+                    "Select a planned target to generate Finder FOV1.",
+                    figsize=(7.8, 6.3),
+                ),
+                core.placeholder_figure(
+                    "Select a planned target to generate Finder FOV2.",
+                    figsize=(7.8, 6.3),
+                ),
+            )
             return
 
         new_r = min(rows[-1], self.tbl.rowCount() - 1)
@@ -3442,7 +3492,10 @@ class MainWindow(QMainWindow):
                 flip_vertical=self.in_flip_vertical.isChecked(),
             )
         else:
-            fig = core.plt.figure(figsize=(7.8, 6.3))
+            fig = core.placeholder_figure(
+                f"Finder FOV{which_fov} is not available yet.",
+                figsize=(7.8, 6.3),
+            )
 
         dlg = FinderInspectorDialog(
             self, fig, which_fov,
