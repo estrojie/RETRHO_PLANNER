@@ -1595,6 +1595,16 @@ class ExposureCalculatorDialog(QDialog):
         )
         self.etc_surface_area.setEnabled(False)
 
+        self.etc_use_peak_surface = QCheckBox("Use peak surface brightness")
+        self.etc_peak_surface_mag = self._dspin(-10.0, 40.0, 18.0, 3, " mag/arcsec²")
+        self.etc_peak_surface_mag.setToolTip(
+            "Optional brightest local surface brightness, for example a galaxy "
+            "nucleus or bright nebular knot. This is used only for saturation/peak-count limits."
+        )
+        self.etc_peak_surface_mag.setEnabled(False)
+        self.etc_use_peak_surface.setEnabled(False)
+        self.etc_use_peak_surface.toggled.connect(self._sync_source_geometry_controls)
+
         self.etc_binning = QComboBox()
         for b in (1, 2, 3):
             self.etc_binning.addItem(f"{b} x {b}", b)
@@ -1657,6 +1667,16 @@ class ExposureCalculatorDialog(QDialog):
         target_grid.addWidget(QLabel("Area:"), 3, 3)
         target_grid.addWidget(self.etc_surface_area, 3, 4, 1, 2)
 
+        peak_sb_row = QWidget()
+        peak_sb_l = QHBoxLayout(peak_sb_row)
+        peak_sb_l.setContentsMargins(0, 0, 0, 0)
+        peak_sb_l.setSpacing(8)
+        peak_sb_l.addWidget(self.etc_use_peak_surface)
+        peak_sb_l.addWidget(self.etc_peak_surface_mag)
+        peak_sb_l.addStretch(1)
+        target_grid.addWidget(QLabel("Brightest region:"), 4, 0)
+        target_grid.addWidget(peak_sb_row, 4, 1, 1, 5)
+
         color_row = QWidget()
         color_l = QHBoxLayout(color_row)
         color_l.setContentsMargins(0, 0, 0, 0)
@@ -1664,13 +1684,13 @@ class ExposureCalculatorDialog(QDialog):
         color_l.addWidget(self.etc_use_color)
         color_l.addWidget(self.etc_color_mag)
         color_l.addWidget(self.etc_color_band, 1)
-        target_grid.addWidget(QLabel("Color constraint:"), 4, 0)
-        target_grid.addWidget(color_row, 4, 1, 1, 5)
+        target_grid.addWidget(QLabel("Color constraint:"), 5, 0)
+        target_grid.addWidget(color_row, 5, 1, 1, 5)
 
-        target_grid.addWidget(QLabel("Desired S/N:"), 5, 0)
-        target_grid.addWidget(self.etc_snr, 5, 1)
-        target_grid.addWidget(QLabel("Peak-count target:"), 5, 2)
-        target_grid.addWidget(peak_counts_widget, 5, 3, 1, 3)
+        target_grid.addWidget(QLabel("Desired S/N:"), 6, 0)
+        target_grid.addWidget(self.etc_snr, 6, 1)
+        target_grid.addWidget(QLabel("Peak-count target:"), 6, 2)
+        target_grid.addWidget(peak_counts_widget, 6, 3, 1, 3)
         target_grid.setColumnStretch(1, 1)
         target_grid.setColumnStretch(3, 2)
         target_grid.setColumnStretch(5, 1)
@@ -1984,12 +2004,17 @@ class ExposureCalculatorDialog(QDialog):
     def _sync_source_geometry_controls(self):
         extended = self.etc_source_geometry.currentData() == "extended"
         self.etc_surface_area.setEnabled(extended)
+        self.etc_use_peak_surface.setEnabled(extended)
+        self.etc_peak_surface_mag.setEnabled(
+            extended and self.etc_use_peak_surface.isChecked()
+        )
         if extended:
             self.etc_ref_mag.setSuffix(" mag/arcsec²")
             self.etc_ref_mag.setToolTip(
-                "Surface brightness in the selected input band."
+                "Mean surface brightness in the selected input band."
             )
         else:
+            self.etc_use_peak_surface.setChecked(False)
             self.etc_ref_mag.setSuffix(" mag")
             self.etc_ref_mag.setToolTip(
                 "Integrated/catalog magnitude in the selected input band."
@@ -2243,6 +2268,14 @@ class ExposureCalculatorDialog(QDialog):
             measurement_area_arcsec2=(
                 float(self.etc_surface_area.value())
                 if self.etc_source_geometry.currentData() == "extended" else None
+            ),
+            peak_surface_brightness_mag_arcsec2=(
+                float(self.etc_peak_surface_mag.value())
+                if (
+                    self.etc_source_geometry.currentData() == "extended"
+                    and self.etc_use_peak_surface.isChecked()
+                )
+                else None
             ),
         )
         return cfg, target, mode_desc
