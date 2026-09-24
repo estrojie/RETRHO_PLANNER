@@ -20,7 +20,9 @@ from matplotlib.backends.backend_qtagg import (
 )
 from matplotlib.patches import Rectangle
 
-from PySide6.QtCore    import Qt, QThread, Signal, QDate, QSize, QTimer, QSignalBlocker
+from PySide6.QtCore    import (
+    Qt, QThread, Signal, QDate, QSize, QTimer, QSignalBlocker, QSettings
+)
 from PySide6.QtGui     import QTextDocument, QFont, QFontDatabase, QImage, QPixmap, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -1863,7 +1865,16 @@ class ExposureCalculatorDialog(QDialog):
         result_tools.addWidget(self.etc_show_technical)
         result_l.addLayout(result_tools)
 
+        self.etc_highlights = QLabel("")
+        self.etc_highlights.setWordWrap(True)
+        self.etc_highlights.setStyleSheet(
+            "font-weight:600; color:#eef2f7; padding:6px; "
+            "background:#20242b; border:1px solid #343a46; border-radius:6px;"
+        )
+        result_l.addWidget(self.etc_highlights)
+
         self.etc_table = QTableWidget(0, 10)
+        self.etc_table.setMinimumHeight(250)
         self.etc_table.setHorizontalHeaderLabels([
             "Filter", "Bandpass", "Est. mag (AB)", "Source rate", "Sky rate",
             "Total time", "Suggested sequence", "Peak counts",
@@ -2344,6 +2355,8 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_summary.setText(
             "Enter a catalogue magnitude and choose its input band to calculate exposures."
         )
+        if hasattr(self, "etc_highlights"):
+            self.etc_highlights.setText("Exposure results will appear here.")
         self.etc_btn_copy.setEnabled(False)
 
     def _mark_manual_target(self):
@@ -2712,6 +2725,20 @@ class ExposureCalculatorDialog(QDialog):
             QMessageBox.critical(self, "Exposure calculation failed", str(exc))
 
     def _populate_results(self):
+        highlight_parts = []
+        for result in self._results:
+            n = int(result["suggested_n"])
+            sub = float(result["suggested_subexposure_s"])
+            if n > 0 and np.isfinite(sub):
+                highlight_parts.append(
+                    f'{result["filter"]}: {n} × {self._fmt_seconds(sub)}'
+                )
+        self.etc_highlights.setText(
+            "Recommended sequences — " + "  ·  ".join(highlight_parts)
+            if highlight_parts
+            else "No finite exposure sequence could be calculated."
+        )
+
         self.etc_table.setRowCount(len(self._results))
         for r, result in enumerate(self._results):
             n = int(result["suggested_n"])
@@ -2829,16 +2856,15 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(12)
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        layout.addWidget(splitter)
+        self._main_splitter = QSplitter(Qt.Horizontal)
+        self._main_splitter.setChildrenCollapsible(False)
+        layout.addWidget(self._main_splitter)
 
-        splitter.addWidget(self._build_left_panel())
-        splitter.addWidget(self._build_center_panel())
-        splitter.addWidget(self._build_right_panel())
+        self._main_splitter.addWidget(self._build_left_panel())
+        self._main_splitter.addWidget(self._build_center_panel())
+        self._main_splitter.addWidget(self._build_right_panel())
 
-        QTimer.singleShot(0, lambda: splitter.setSizes([360, 790, 500]))
-        QTimer.singleShot(0, lambda: self._right_split.setSizes([360, 540]))
+        QTimer.singleShot(0, self._restore_ui_settings)
 
         self._bind_altitude_click()
         self._bind_finder_clicks()
@@ -2849,6 +2875,63 @@ class MainWindow(QMainWindow):
         configure_interactive_widgets(self)
         self.apply_date_location(initial=True)
         QTimer.singleShot(250, self.refresh_sky)
+
+    def _restore_ui_settings(self):
+        settings = QSettings("RETRHO", "RHOPlanner")
+        geometry = settings.value("main/geometry")
+        if geometry is not None:
+            try:
+                self.restoreGeometry(geometry)
+            except Exception:
+                pass
+
+        main_state = settings.value("main/splitter")
+        if main_state is not None:
+            try:
+                self._main_splitter.restoreState(main_state)
+            except Exception:
+                self._main_splitter.setSizes([360, 790, 500])
+        else:
+            self._main_splitter.setSizes([360, 790, 500])
+
+        right_state = settings.value("main/right_splitter")
+        if right_state is not None:
+            try:
+                self._right_split.restoreState(right_state)
+            except Exception:
+                self._right_split.setSizes([360, 540])
+        else:
+            self._right_split.setSizes([360, 540])
+
+        try:
+            self.in_fov1.setValue(int(settings.value("finder/fov1_w", self._default_fov1)))
+            self.in_fov1_h.setValue(int(settings.value("finder/fov1_h", self._default_fov1)))
+            self.in_fov2.setValue(int(settings.value("finder/fov2_w", self._default_fov2)))
+            self.in_fov2_h.setValue(int(settings.value("finder/fov2_h", self._default_fov2)))
+            self.in_roll.setValue(float(settings.value("finder/roll", 0.0)))
+            self.in_survey.setCurrentText(str(settings.value("finder/survey", self._default_survey)))
+            self.in_flip_horizontal.setChecked(
+                str(settings.value("finder/flip_h", "false")).lower() in {"1", "true", "yes"}
+            )
+            self.in_flip_vertical.setChecked(
+                str(settings.value("finder/flip_v", "false")).lower() in {"1", "true", "yes"}
+            )
+        except Exception:
+            pass
+
+    def _save_ui_settings(self):
+        settings = QSettings("RETRHO", "RHOPlanner")
+        settings.setValue("main/geometry", self.saveGeometry())
+        settings.setValue("main/splitter", self._main_splitter.saveState())
+        settings.setValue("main/right_splitter", self._right_split.saveState())
+        settings.setValue("finder/fov1_w", self.in_fov1.value())
+        settings.setValue("finder/fov1_h", self.in_fov1_h.value())
+        settings.setValue("finder/fov2_w", self.in_fov2.value())
+        settings.setValue("finder/fov2_h", self.in_fov2_h.value())
+        settings.setValue("finder/roll", self.in_roll.value())
+        settings.setValue("finder/survey", self.in_survey.currentText())
+        settings.setValue("finder/flip_h", self.in_flip_horizontal.isChecked())
+        settings.setValue("finder/flip_v", self.in_flip_vertical.isChecked())
 
     def _build_left_panel(self) -> QWidget:
         left   = QWidget()
@@ -3460,6 +3543,7 @@ class MainWindow(QMainWindow):
                 figsize=(7.8, 4.9),
             )
         )
+        self._set_plot_action_state(False, False, False)
         self._set_finder_figs(
             core.placeholder_figure(
                 "Select a planned target to generate Finder FOV1.",
@@ -3506,6 +3590,7 @@ class MainWindow(QMainWindow):
                     figsize=(7.8, 4.9),
                 )
             )
+            self._set_plot_action_state(False, False, False)
             self._set_finder_figs(
                 core.placeholder_figure(
                     "Select a planned target to generate Finder FOV1.",
@@ -3518,10 +3603,9 @@ class MainWindow(QMainWindow):
             )
             return
 
-        new_r = min(rows[-1], self.tbl.rowCount() - 1)
-        if new_r >= 0:
-            self.tbl.selectRow(new_r)
-            self.on_row_selected()
+        # Removing a target invalidates altitude windows/plots. Recompute the
+        # remaining plan immediately; this is local for already-resolved rows.
+        self.plan_observations()
 
     def plan_observations(self):
         if not self.plan:
@@ -3830,6 +3914,10 @@ class MainWindow(QMainWindow):
                                           lambda e: self.open_finder_inspector(2))
 
     def closeEvent(self, event):
+        try:
+            self._save_ui_settings()
+        except Exception:
+            pass
         workers = (
             list(self._finder_workers)
             + list(self._plan_workers)
