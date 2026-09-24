@@ -60,6 +60,10 @@ def _get_simbad():
 
         client = Simbad()
         try:
+            client.TIMEOUT = 10
+        except Exception:
+            pass
+        try:
             client.add_votable_fields("flux(V)")
         except Exception:
             pass
