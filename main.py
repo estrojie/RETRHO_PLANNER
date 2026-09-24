@@ -1472,13 +1472,6 @@ class ExposureCalculatorDialog(QDialog):
         "minimum_exposure_s": 0.10,
     }
 
-    GOAL_PRESETS = {
-        "finder": ("Finder / framing", 20.0),
-        "general": ("General imaging", 50.0),
-        "photometry": ("Standard photometry", 100.0),
-        "precision": ("High-precision photometry", 200.0),
-    }
-
     CONDITION_PRESETS = {
         "good": ("Good", 7.0, 1.15),
         "typical": ("Typical", 10.3, 1.30),
@@ -1492,7 +1485,6 @@ class ExposureCalculatorDialog(QDialog):
         self.parent_window = parent
         self._results = []
         self.setWindowTitle("RHO Exposure Time Calculator")
-        self.setMinimumSize(720, 540)
         self._size_for_available_screen(parent)
 
         root = QVBoxLayout(self)
@@ -1500,10 +1492,9 @@ class ExposureCalculatorDialog(QDialog):
         root.setSpacing(8)
 
         intro = QLabel(
-            "Choose a catalogue magnitude in any supported Johnson/Cousins, "
-            "Gaia, Sloan, or narrowband input band. Simple mode uses the RHO "
-            "camera profile and observing presets; Advanced mode exposes the "
-            "underlying assumptions."
+            "Choose the target, input magnitude/band, desired S/N, and optional "
+            "peak-count target. Quick mode uses RHO defaults; Advanced exposes "
+            "instrument and observing assumptions."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -1529,6 +1520,10 @@ class ExposureCalculatorDialog(QDialog):
         for b in (1, 2, 3):
             self.etc_binning.addItem(f"{b} x {b}", b)
         self.etc_binning.setCurrentIndex(2)
+
+        self.etc_snr = self._dspin(1.0, 10000.0, 100.0, 1)
+        self.etc_snr.setSingleStep(10.0)
+        self.etc_snr.setToolTip("Desired stacked signal-to-noise ratio.")
 
         self.etc_use_peak_counts = QCheckBox("Use")
         self.etc_use_peak_counts.setChecked(True)
@@ -1577,8 +1572,10 @@ class ExposureCalculatorDialog(QDialog):
         target_grid.addWidget(self.etc_ref_band, 2, 3)
         target_grid.addWidget(QLabel("Binning:"), 2, 4)
         target_grid.addWidget(self.etc_binning, 2, 5)
-        target_grid.addWidget(QLabel("Peak-count target:"), 3, 0)
-        target_grid.addWidget(peak_counts_widget, 3, 1, 1, 5)
+        target_grid.addWidget(QLabel("Desired S/N:"), 3, 0)
+        target_grid.addWidget(self.etc_snr, 3, 1)
+        target_grid.addWidget(QLabel("Peak-count target:"), 3, 2)
+        target_grid.addWidget(peak_counts_widget, 3, 3, 1, 3)
         target_grid.setColumnStretch(1, 1)
         target_grid.setColumnStretch(3, 2)
         target_grid.setColumnStretch(5, 1)
@@ -1589,7 +1586,7 @@ class ExposureCalculatorDialog(QDialog):
         root.addWidget(self.etc_splitter, 1)
 
         self.etc_tabs = QTabWidget()
-        self.etc_tabs.addTab(self._build_simple_page(), "Simple")
+        self.etc_tabs.addTab(self._build_simple_page(), "Quick")
         self.etc_tabs.addTab(self._build_advanced_page(), "Advanced")
         self.etc_splitter.addWidget(self.etc_tabs)
 
@@ -1633,6 +1630,7 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_btn_calculate = QPushButton("Calculate Exposure Plan")
         self.etc_btn_calculate.setIcon(std_icon(self, "SP_MediaPlay"))
         self.etc_btn_calculate.clicked.connect(self.calculate)
+        style_primary_button(self.etc_btn_calculate)
 
         self.etc_btn_copy = QPushButton("Copy Results")
         self.etc_btn_copy.setIcon(std_icon(self, "SP_DialogSaveButton"))
@@ -1655,20 +1653,11 @@ class ExposureCalculatorDialog(QDialog):
         self._sync_spectrum_controls()
         self._sync_peak_counts_control()
         self._set_technical_columns(False)
+        configure_interactive_widgets(self)
         self.calculate()
 
     def _size_for_available_screen(self, parent):
-        try:
-            screen = parent.screen() if parent is not None else QGuiApplication.primaryScreen()
-            geom = screen.availableGeometry() if screen is not None else None
-            if geom is not None:
-                width = min(1180, max(720, int(geom.width() * 0.90)))
-                height = min(840, max(540, int(geom.height() * 0.88)))
-                self.resize(width, height)
-                return
-        except Exception:
-            pass
-        self.resize(1080, 760)
+        fit_window_to_screen(self, 1080, 760, min_w=680, min_h=500)
 
     def _populate_reference_bands(self):
         first_group = True
@@ -1702,26 +1691,18 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_source_type.addItem("Star / continuum object", "star")
         self.etc_source_type.addItem("Emission nebula", "nebula")
 
-        self.etc_goal = QComboBox()
-        for key, (label, _snr) in self.GOAL_PRESETS.items():
-            self.etc_goal.addItem(label, key)
-        self.etc_goal.setCurrentIndex(1)
-
         self.etc_conditions = QComboBox()
         for key, (label, _fwhm, _airmass) in self.CONDITION_PRESETS.items():
             self.etc_conditions.addItem(label, key)
         self.etc_conditions.setCurrentIndex(1)
 
         form.addRow("Source type:", self.etc_source_type)
-        form.addRow("Imaging goal:", self.etc_goal)
         form.addRow("Conditions:", self.etc_conditions)
 
         note = QLabel(
-            "Simple mode automatically supplies the RHO telescope/camera values, "
-            "an S/N goal, airmass, measured image width, and safe broadband / "
-            "narrowband subexposure limits. The peak-count target sets the "
-            "preferred level in each frame, while S/N determines how many frames "
-            "are required. The selected input band remains fully configurable."
+            "Quick mode supplies the RHO telescope/camera values, airmass, "
+            "measured image width, and safe broadband/narrowband subexposure "
+            "limits. Set the desired S/N and optional peak-count target above."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color:#aeb7c4;")
@@ -1775,7 +1756,6 @@ class ExposureCalculatorDialog(QDialog):
         obs_form = QFormLayout(obs_box)
         obs_form.setVerticalSpacing(7)
 
-        self.etc_snr = self._dspin(1.0, 10000.0, 100.0, 1)
         self.etc_airmass = self._dspin(1.0, 5.0, 1.30, 2)
         self.etc_seeing = self._dspin(0.2, 60.0, 10.3, 2, " arcsec")
         self.etc_ap_radius = self._dspin(0.5, 5.0, 1.5, 2, " x FWHM")
@@ -1784,7 +1764,6 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_min_exp = self._dspin(
             0.001, 60.0, d["minimum_exposure_s"], 3, " s")
 
-        obs_form.addRow("Desired S/N:", self.etc_snr)
         obs_form.addRow("Airmass:", self.etc_airmass)
         obs_form.addRow("Measured stellar FWHM:", self.etc_seeing)
         obs_form.addRow("Photometry aperture radius:", self.etc_ap_radius)
@@ -2038,12 +2017,10 @@ class ExposureCalculatorDialog(QDialog):
         self._select_planner_target(row=planner_row, name=name)
 
     def _simple_values(self):
-        goal_key = str(self.etc_goal.currentData() or "general")
         cond_key = str(self.etc_conditions.currentData() or "typical")
-        _goal_label, snr = self.GOAL_PRESETS[goal_key]
         _cond_label, fwhm, airmass = self.CONDITION_PRESETS[cond_key]
         source_type = str(self.etc_source_type.currentData() or "star")
-        return source_type, float(snr), float(fwhm), float(airmass)
+        return source_type, float(self.etc_snr.value()), float(fwhm), float(airmass)
 
     def _build_calculation_inputs(self):
         binning = int(self.etc_binning.currentData() or 1)
@@ -2069,8 +2046,8 @@ class ExposureCalculatorDialog(QDialog):
             temperature = 5800.0
             line_fluxes = {name: 0.0 for name in ("H-alpha", "H-beta", "OIII", "SII")}
             mode_desc = (
-                f"Simple mode · {self.etc_goal.currentText()} · "
-                f"{self.etc_conditions.currentText()} conditions · {binning}x{binning}"
+                f"Quick mode · {self.etc_conditions.currentText()} conditions · "
+                f"{binning}x{binning}"
             )
         else:
             aperture_m = float(self.etc_aperture.value())
