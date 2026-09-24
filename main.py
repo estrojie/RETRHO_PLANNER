@@ -1971,6 +1971,10 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_line_flux_mode = QComboBox()
         self.etc_line_flux_mode.addItem("Integrated aperture flux", "integrated")
         self.etc_line_flux_mode.addItem("Surface flux per arcsec²", "surface")
+        self.etc_line_flux_mode.addItem("Surface brightness in Rayleighs", "rayleigh")
+        self.etc_line_flux_mode.currentIndexChanged.connect(
+            self._sync_line_flux_controls
+        )
         source_form.addRow("Emission-line input:", self.etc_line_flux_mode)
 
         self.etc_peak_line_factor = self._dspin(1.0, 1.0e4, 1.0, 2, " x mean")
@@ -1980,10 +1984,11 @@ class ExposureCalculatorDialog(QDialog):
         )
         source_form.addRow("Peak line concentration:", self.etc_peak_line_factor)
 
-        line_note = QLabel(
-            "Optional H-alpha/H-beta/[O III]/[S II] fluxes in units of "
-            "10^-14 erg s^-1 cm^-2. In surface mode the same unit is per arcsec²."
+        self.etc_line_note = QLabel(
+            "Optional H-alpha/H-beta/[O III]/[S II] integrated fluxes in "
+            "10^-14 erg s^-1 cm^-2. Leave zero for continuum-only."
         )
+        line_note = self.etc_line_note
         line_note.setWordWrap(True)
         source_form.addRow(line_note)
 
@@ -1993,6 +1998,7 @@ class ExposureCalculatorDialog(QDialog):
             self.etc_line_flux[filt] = spin
             source_form.addRow(f"{filt} line flux:", spin)
         advanced_tabs.addTab(self._scrollable(source_box), "Spectrum / Lines")
+        self._sync_line_flux_controls()
         return page
 
     @staticmethod
@@ -2125,6 +2131,32 @@ class ExposureCalculatorDialog(QDialog):
         if hasattr(self, "etc_temperature"):
             self.etc_temperature.setEnabled(
                 self.etc_spectrum.currentData() == "blackbody")
+
+    def _sync_line_flux_controls(self):
+        if not hasattr(self, "etc_line_flux_mode") or not hasattr(self, "etc_line_flux"):
+            return
+        mode = str(self.etc_line_flux_mode.currentData() or "integrated")
+        if mode == "rayleigh":
+            suffix = " R"
+            note = (
+                "Optional emission-line surface brightness in Rayleighs. "
+                "Values are converted to cgs using each line wavelength."
+            )
+        elif mode == "surface":
+            suffix = " x10^-14 /arcsec²"
+            note = (
+                "Optional line surface flux in 10^-14 erg s^-1 cm^-2 arcsec^-2."
+            )
+        else:
+            suffix = " x10^-14"
+            note = (
+                "Optional integrated line flux in 10^-14 erg s^-1 cm^-2 "
+                "within the measurement aperture."
+            )
+        for spin in self.etc_line_flux.values():
+            spin.setSuffix(suffix)
+        if hasattr(self, "etc_line_note"):
+            self.etc_line_note.setText(note)
 
     def _sync_peak_counts_control(self):
         if hasattr(self, "etc_peak_counts") and hasattr(self, "etc_use_peak_counts"):
@@ -2334,16 +2366,27 @@ class ExposureCalculatorDialog(QDialog):
             max_narrowband = float(self.etc_max_narrowband_sub.value())
             spectrum_model = str(self.etc_spectrum.currentData())
             temperature = float(self.etc_temperature.value())
-            raw_lines = {
-                name: float(spin.value()) * 1.0e-14
-                for name, spin in self.etc_line_flux.items()
-            }
-            if self.etc_line_flux_mode.currentData() == "surface":
-                line_surface_fluxes = raw_lines
-                line_fluxes = {name: 0.0 for name in raw_lines}
+            line_mode = str(self.etc_line_flux_mode.currentData() or "integrated")
+            if line_mode == "rayleigh":
+                line_surface_fluxes = {
+                    name: core.rayleigh_to_erg_s_cm2_arcsec2(
+                        float(spin.value()),
+                        core.EXPOSURE_FILTERS[name].central_nm,
+                    )
+                    for name, spin in self.etc_line_flux.items()
+                }
+                line_fluxes = {name: 0.0 for name in line_surface_fluxes}
             else:
-                line_fluxes = raw_lines
-                line_surface_fluxes = {name: 0.0 for name in raw_lines}
+                raw_lines = {
+                    name: float(spin.value()) * 1.0e-14
+                    for name, spin in self.etc_line_flux.items()
+                }
+                if line_mode == "surface":
+                    line_surface_fluxes = raw_lines
+                    line_fluxes = {name: 0.0 for name in raw_lines}
+                else:
+                    line_fluxes = raw_lines
+                    line_surface_fluxes = {name: 0.0 for name in raw_lines}
             mode_desc = f"Advanced mode · {binning}x{binning} binning"
 
         pixel_scale = physical_scale * binning
@@ -2377,7 +2420,7 @@ class ExposureCalculatorDialog(QDialog):
         if (
             source_geometry != "extended"
             and not simple_mode
-            and self.etc_line_flux_mode.currentData() == "surface"
+            and self.etc_line_flux_mode.currentData() in {"surface", "rayleigh"}
             and any(float(spin.value()) > 0.0 for spin in self.etc_line_flux.values())
         ):
             raise ValueError(
