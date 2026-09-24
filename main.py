@@ -253,23 +253,41 @@ class PlanRow:
     notes:           str = ""
 
 class PlanWorker(QThread):
-    finished = Signal(list, object, list, list)
-    failed   = Signal(str)
+    finished = Signal(int, list, object, list, list)
+    failed = Signal(int, str)
+    progress = Signal(int, int, str)
 
-    def __init__(self, plan: List[PlanRow], min_alt: float, max_alt: float):
+    def __init__(
+        self,
+        request_id: int,
+        plan: List[PlanRow],
+        min_alt: float,
+        max_alt: float,
+        site,
+        planning_date,
+    ):
         super().__init__()
-        self.plan    = plan
+        self.request_id = int(request_id)
+        self.plan = list(plan)
         self.min_alt = min_alt
         self.max_alt = max_alt
+        self.site = site
+        self.planning_date = planning_date
 
     def run(self):
         try:
             updated: List[PlanRow] = []
             coords, names = [], []
 
-            for row in self.plan:
+            total = len(self.plan)
+            for index, row in enumerate(self.plan, start=1):
+                if self.isInterruptionRequested():
+                    return
+                self.progress.emit(index, total, f"Resolving {row.name or 'target'}…")
                 try:
-                    rt = core.resolve_target(row.name, row.ra, row.dec)
+                    rt = core.resolve_target(
+                        row.name, row.ra, row.dec, lookup_photometry=False
+                    )
                     resolved_ok = True
                 except Exception:
                     resolved_ok = False
@@ -294,7 +312,14 @@ class PlanWorker(QThread):
                     pass
 
                 try:
-                    windows   = core.compute_visibility_windows(rt.coord, self.min_alt, self.max_alt)
+                    self.progress.emit(index, total, f"Computing visibility for {rt.display_name}…")
+                    windows = core.compute_visibility_windows(
+                        rt.coord,
+                        self.min_alt,
+                        self.max_alt,
+                        site=self.site,
+                        planning_date=self.planning_date,
+                    )
                     windows_s = core.format_visibility_windows(windows)
                 except Exception:
                     windows_s = "—"
@@ -325,10 +350,20 @@ class PlanWorker(QThread):
                 coords.append(rt.coord)
                 names.append(rt.display_name)
 
-            alt_fig = core.plot_altitudes(coords, names, self.min_alt, self.max_alt) if coords else None
-            self.finished.emit(updated, alt_fig, coords, names)
+            alt_fig = (
+                core.plot_altitudes(
+                    coords,
+                    names,
+                    self.min_alt,
+                    self.max_alt,
+                    site=self.site,
+                    planning_date=self.planning_date,
+                )
+                if coords else None
+            )
+            self.finished.emit(self.request_id, updated, alt_fig, coords, names)
         except Exception as e:
-            self.failed.emit(str(e))
+            self.failed.emit(self.request_id, str(e))
 
 
 class FinderWorker(QThread):
@@ -362,7 +397,9 @@ class FinderWorker(QThread):
 
     def run(self):
         try:
-            rt = core.resolve_target(self.name, self.ra, self.dec)
+            rt = core.resolve_target(
+                self.name, self.ra, self.dec, lookup_photometry=False
+            )
 
             data1, wcs1, lbl1 = core.fetch_finder_raw(
                 rt.coord, self.fov1_w, self.mode, fov_h_arcmin=self.fov1_h)
@@ -1574,6 +1611,7 @@ class ExposureCalculatorDialog(QDialog):
         self.parent_window = parent
         self._results = []
         self._updating_target_fields = False
+        self._magnitude_is_user_valid = False
         self.setWindowTitle("RHO Exposure Time Calculator")
         self._size_for_available_screen(parent)
 
@@ -1599,7 +1637,7 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_target_name.setPlaceholderText("Any planned or unplanned object")
         self.etc_target_name.textEdited.connect(self._mark_manual_target)
         self.etc_ref_mag = self._dspin(-10.0, 40.0, 12.0, 3, " mag")
-        self.etc_ref_mag.valueChanged.connect(lambda _value: self._mark_manual_target())
+        self.etc_ref_mag.valueChanged.connect(self._on_manual_magnitude_changed)
         self.etc_ref_band = QComboBox()
         self._populate_reference_bands()
         self._set_reference_band("Johnson V")
@@ -1809,7 +1847,7 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_splitter.addWidget(result_box)
         self.etc_splitter.setStretchFactor(0, 0)
         self.etc_splitter.setStretchFactor(1, 1)
-        self.etc_splitter.setSizes([275, 430])
+        self.etc_splitter.setSizes([190, 520])
 
         buttons = QHBoxLayout()
         self.etc_btn_calculate = QPushButton("Calculate Exposure Plan")
@@ -1841,7 +1879,10 @@ class ExposureCalculatorDialog(QDialog):
         self._sync_peak_counts_control()
         self._set_technical_columns(False)
         configure_interactive_widgets(self)
-        self.calculate()
+        if self._magnitude_is_user_valid:
+            self.calculate()
+        else:
+            self._show_magnitude_required()
 
     def _size_for_available_screen(self, parent):
         fit_window_to_screen(self, 1080, 760, min_w=680, min_h=500)
@@ -2193,6 +2234,19 @@ class ExposureCalculatorDialog(QDialog):
             str(getattr(row, "dec", "") or "").strip(),
         )
 
+    def _on_manual_magnitude_changed(self, _value):
+        if not self._updating_target_fields:
+            self._magnitude_is_user_valid = True
+        self._mark_manual_target()
+
+    def _show_magnitude_required(self):
+        self._results = []
+        self.etc_table.setRowCount(0)
+        self.etc_summary.setText(
+            "Enter a catalogue magnitude and choose its input band to calculate exposures."
+        )
+        self.etc_btn_copy.setEnabled(False)
+
     def _mark_manual_target(self):
         if self._updating_target_fields or not hasattr(self, "etc_target_selector"):
             return
@@ -2324,6 +2378,10 @@ class ExposureCalculatorDialog(QDialog):
             if mag is not None:
                 self.etc_ref_mag.setValue(mag)
                 self._set_reference_band("Johnson V")
+                self._magnitude_is_user_valid = True
+            elif planner_row is not None:
+                self._magnitude_is_user_valid = False
+                self._show_magnitude_required()
             self._select_planner_target(row=planner_row, name=name)
         finally:
             self._updating_target_fields = False
@@ -2335,6 +2393,11 @@ class ExposureCalculatorDialog(QDialog):
         return source_type, float(self.etc_snr.value()), float(fwhm), float(airmass)
 
     def _build_calculation_inputs(self):
+        if not self._magnitude_is_user_valid:
+            raise ValueError(
+                "No usable target magnitude is available. Enter a catalogue magnitude "
+                "and choose the corresponding input band."
+            )
         binning = int(self.etc_binning.currentData() or 1)
         simple_mode = self.etc_tabs.currentIndex() == 0
 
@@ -2545,6 +2608,7 @@ class ExposureCalculatorDialog(QDialog):
                 f"{obstruction_note}"
             )
             self._populate_results()
+            self.etc_btn_copy.setEnabled(True)
         except Exception as exc:
             QMessageBox.critical(self, "Exposure calculation failed", str(exc))
 
@@ -2629,6 +2693,8 @@ class MainWindow(QMainWindow):
         self._sky_workers: set = set()
         self._sky_request_id = 0
         self._finder_request_id = 0
+        self._plan_request_id = 0
+        self._planning_active = False
 
         self._last_coords: list = []
         self._last_names:  list = []
@@ -2646,6 +2712,11 @@ class MainWindow(QMainWindow):
         self._finder_fov_debounce.setSingleShot(True)
         self._finder_fov_debounce.setInterval(500)
         self._finder_fov_debounce.timeout.connect(self.refresh_finders_for_selected)
+
+        self._finder_select_debounce = QTimer(self)
+        self._finder_select_debounce.setSingleShot(True)
+        self._finder_select_debounce.setInterval(350)
+        self._finder_select_debounce.timeout.connect(self._start_finder_for_current_row)
 
         root   = QWidget()
         self.setCentralWidget(root)
@@ -2740,10 +2811,10 @@ class MainWindow(QMainWindow):
         self.lbl_cloud_next = QLabel("—")
 
         sky_form.addRow("Sunset (plan date):",   self.lbl_sunset)
-        sky_form.addRow("Moon alt (plan date):",  self.lbl_moon_alt)
-        sky_form.addRow("Moon illum (plan date):", self.lbl_moon_illum)
-        sky_form.addRow("Cloud cover (now):",     self.lbl_cloud_now)
-        sky_form.addRow("Cloud cover (+1 hr):",   self.lbl_cloud_next)
+        sky_form.addRow("Moon alt (20:00 plan date):", self.lbl_moon_alt)
+        sky_form.addRow("Moon illum (20:00 plan date):", self.lbl_moon_illum)
+        sky_form.addRow("Current cloud cover:", self.lbl_cloud_now)
+        sky_form.addRow("Current cloud (+1 hr):", self.lbl_cloud_next)
 
         btn_refresh = QPushButton("Refresh")
         btn_refresh.setIcon(std_icon(self, "SP_BrowserReload"))
@@ -2855,8 +2926,11 @@ class MainWindow(QMainWindow):
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tbl.itemSelectionChanged.connect(self.on_row_selected)
+        self.tbl.currentCellChanged.connect(
+            lambda *_: self._finder_select_debounce.start()
+        )
         self.tbl.setAlternatingRowColors(True)
-        self.tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.tbl.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tbl.setWordWrap(False)
@@ -2894,9 +2968,14 @@ class MainWindow(QMainWindow):
         btn_bar_l.addWidget(self.btn_clear)
         btn_bar_l.addStretch(1)
 
+        self.lbl_plan_progress = QLabel("")
+        self.lbl_plan_progress.setStyleSheet("color:#aeb7c4;")
+        self.lbl_plan_progress.setWordWrap(True)
+
         center_l.addWidget(tabs)
         center_l.addWidget(QLabel("Planned Targets"))
         center_l.addWidget(self.tbl, 1)
+        center_l.addWidget(self.lbl_plan_progress)
         center_l.addWidget(btn_bar)
         return center
 
@@ -2942,11 +3021,13 @@ class MainWindow(QMainWindow):
         style_toolbar_button(self.btn_open_alt)
         style_primary_button(self.btn_open_alt)
         self.btn_open_alt.clicked.connect(self.open_altitude_inspector)
+        self.btn_open_alt.setEnabled(False)
 
         self.btn_copy_alt = QPushButton("Copy Altitude Plot")
         style_toolbar_button(self.btn_copy_alt)
         self.btn_copy_alt.setIcon(std_icon(self, "SP_DialogSaveButton"))
         self.btn_copy_alt.clicked.connect(self.copy_altitude_plot)
+        self.btn_copy_alt.setEnabled(False)
 
         alt_btn_row_l.addWidget(self.btn_open_alt)
         alt_btn_row_l.addWidget(self.btn_copy_alt)
@@ -2982,21 +3063,25 @@ class MainWindow(QMainWindow):
         style_toolbar_button(self.btn_open_fov1)
         style_primary_button(self.btn_open_fov1)
         self.btn_open_fov1.clicked.connect(lambda: self.open_finder_inspector(1))
+        self.btn_open_fov1.setEnabled(False)
 
         self.btn_copy_fov1 = QPushButton("Copy FOV1")
         style_toolbar_button(self.btn_copy_fov1)
         self.btn_copy_fov1.setIcon(std_icon(self, "SP_DialogSaveButton"))
         self.btn_copy_fov1.clicked.connect(lambda: self.copy_finder_plot(1))
+        self.btn_copy_fov1.setEnabled(False)
 
         self.btn_open_fov2 = QPushButton("Open FOV2 Inspector")
         style_toolbar_button(self.btn_open_fov2)
         style_primary_button(self.btn_open_fov2)
         self.btn_open_fov2.clicked.connect(lambda: self.open_finder_inspector(2))
+        self.btn_open_fov2.setEnabled(False)
 
         self.btn_copy_fov2 = QPushButton("Copy FOV2")
         style_toolbar_button(self.btn_copy_fov2)
         self.btn_copy_fov2.setIcon(std_icon(self, "SP_DialogSaveButton"))
         self.btn_copy_fov2.clicked.connect(lambda: self.copy_finder_plot(2))
+        self.btn_copy_fov2.setEnabled(False)
 
         finder_btn_row_l.addWidget(self.btn_open_fov1, 0, 0)
         finder_btn_row_l.addWidget(self.btn_copy_fov1, 0, 1)
@@ -3027,14 +3112,25 @@ class MainWindow(QMainWindow):
         right_l.addWidget(self._right_split, 1)
         return right
 
+    def _set_plot_action_state(self, altitude: bool, fov1: bool, fov2: bool):
+        self.btn_open_alt.setEnabled(bool(altitude))
+        self.btn_copy_alt.setEnabled(bool(altitude))
+        self.btn_open_fov1.setEnabled(bool(fov1))
+        self.btn_copy_fov1.setEnabled(bool(fov1))
+        self.btn_open_fov2.setEnabled(bool(fov2))
+        self.btn_copy_fov2.setEnabled(bool(fov2))
+
     def _build_manual_tab(self) -> QWidget:
         w = QWidget(); l = QVBoxLayout(w); l.setSpacing(10)
         box  = QGroupBox("Add Target")
         form = QFormLayout(box); form.setVerticalSpacing(8)
 
         self.in_name = QLineEdit()
-        self.in_ra   = QLineEdit()
-        self.in_dec  = QLineEdit()
+        self.in_name.setPlaceholderText("e.g. Copernicus / 55 Cnc")
+        self.in_ra = QLineEdit()
+        self.in_ra.setPlaceholderText("e.g. 08:52:35.8 or 133.1492")
+        self.in_dec = QLineEdit()
+        self.in_dec.setPlaceholderText("e.g. +28:19:51 or 28.3308")
         self.in_pr   = QSpinBox(); self.in_pr.setRange(1, 5); self.in_pr.setValue(3)
 
         form.addRow("Name:",                 self.in_name)
@@ -3157,7 +3253,8 @@ class MainWindow(QMainWindow):
 
             if not initial and self.plan:
                 self.plan_observations()
-            self.statusBar().showMessage("Ready")
+            else:
+                self.statusBar().showMessage("Ready")
         except Exception as e:
             self.statusBar().showMessage("Apply failed.")
             QMessageBox.critical(self, "Apply failed", str(e))
@@ -3188,10 +3285,28 @@ class MainWindow(QMainWindow):
             pr   = int(self.in_pr.value())
             if not (name or (ra and dec)):
                 raise ValueError("Enter a name (SIMBAD) or provide RA/Dec.")
+            candidate_key = (
+                name.strip().lower(),
+                ra.strip().lower(),
+                dec.strip().lower(),
+            )
+            for existing in self.plan:
+                existing_key = (
+                    str(existing.name).strip().lower(),
+                    str(existing.ra).strip().lower(),
+                    str(existing.dec).strip().lower(),
+                )
+                if existing_key == candidate_key:
+                    raise ValueError("This target is already in the observing plan.")
+
             row = PlanRow(name=name, ra=ra, dec=dec, priority=pr)
             self.plan.append(row)
             self._append_table_row(row)
             self._refresh_open_exposure_targets(preferred_row=row)
+            self.in_name.clear()
+            self.in_ra.clear()
+            self.in_dec.clear()
+            self.in_pr.setValue(3)
             self.statusBar().showMessage(f"Added target: {name or 'Unnamed'}")
         except Exception as e:
             self.statusBar().showMessage("Invalid target.")
@@ -3224,6 +3339,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Upload failed", str(e))
 
     def clear_plan(self):
+        self._finder_request_id += 1
+        self._plan_request_id += 1
+        self._finder_select_debounce.stop()
         self.plan = []
         self.tbl.setRowCount(0)
         self._last_coords = []
@@ -3250,6 +3368,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Plan cleared.")
 
     def remove_selected(self):
+        self._finder_request_id += 1
+        self._finder_select_debounce.stop()
         idxs = self.tbl.selectionModel().selectedRows()
         if not idxs:
             QMessageBox.information(self, "No selection", "Select rows to remove.")
@@ -3308,29 +3428,68 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Settings", "Max altitude must be > min altitude.")
             return
 
+        self._plan_request_id += 1
+        request_id = self._plan_request_id
+        self._planning_active = True
         self.btn_plan.setEnabled(False)
+        self.btn_remove.setEnabled(False)
+        self.btn_clear.setEnabled(False)
+        self.lbl_plan_progress.setText("Starting planner…")
         self.statusBar().showMessage("Planning observations…")
 
-        worker = PlanWorker(self.plan, min_alt, max_alt)
+        plan_snapshot = [
+            PlanRow(
+                name=row.name, ra=row.ra, dec=row.dec, priority=row.priority,
+                vmag=row.vmag, visible_windows=row.visible_windows, notes=row.notes,
+            )
+            for row in self.plan
+        ]
+        worker = PlanWorker(
+            request_id,
+            plan_snapshot,
+            min_alt,
+            max_alt,
+            core.get_site_config(),
+            core.get_planning_date(),
+        )
         self._plan_workers.add(worker)
+        worker.progress.connect(
+            lambda current, total, message:
+                self._on_plan_progress(request_id, current, total, message)
+        )
         worker.finished.connect(self.on_plan_finished)
         worker.failed.connect(self.on_plan_failed)
 
         def _cleanup():
             self._plan_workers.discard(worker)
             worker.deleteLater()
-            self.btn_plan.setEnabled(True)
+            if request_id == self._plan_request_id:
+                self._planning_active = False
+                self.btn_plan.setEnabled(True)
+                self.btn_remove.setEnabled(True)
+                self.btn_clear.setEnabled(True)
 
         worker.finished.connect(lambda *_: _cleanup())
         worker.failed.connect(lambda *_: _cleanup())
         worker.start()
 
-    def on_plan_failed(self, msg: str):
+    def _on_plan_progress(self, request_id: int, current: int, total: int, message: str):
+        if request_id != self._plan_request_id:
+            return
+        self.lbl_plan_progress.setText(f"{message}  ({current}/{total})")
+        self.statusBar().showMessage(f"{message}  ({current}/{total})")
+
+    def on_plan_failed(self, request_id: int, msg: str):
+        if request_id != self._plan_request_id:
+            return
+        self.lbl_plan_progress.setText("")
         self.statusBar().showMessage("Planning failed.")
         QMessageBox.critical(self, "Planning failed", msg)
 
-    def on_plan_finished(self, updated_plan, altitude_fig, coords, names):
-        self.plan         = updated_plan
+    def on_plan_finished(self, request_id, updated_plan, altitude_fig, coords, names):
+        if request_id != self._plan_request_id:
+            return
+        self.plan = updated_plan
         self._last_coords = coords
         self._last_names  = names
         self._raw_finder  = {}   
@@ -3341,7 +3500,9 @@ class MainWindow(QMainWindow):
 
         if altitude_fig is not None:
             self._set_altitude_fig(altitude_fig)
+            self._set_plot_action_state(True, False, False)
 
+        self.lbl_plan_progress.setText("")
         if self.tbl.rowCount() > 0:
             self.tbl.selectRow(0)
 
@@ -3350,19 +3511,24 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Planning complete.")
 
     def refresh_finders_for_selected(self):
-        if self.tbl.selectionModel().selectedRows():
-            self.on_row_selected()
+        if self._selected_row is not None:
+            self._start_finder_for_current_row()
 
     def on_row_selected(self):
-        idxs = self.tbl.selectionModel().selectedRows()
-        if not idxs:
-            return
-        r = idxs[0].row()
+        r = self.tbl.currentRow()
+        if r < 0:
+            idxs = self.tbl.selectionModel().selectedRows()
+            r = idxs[0].row() if idxs else -1
         if r < 0 or r >= len(self.plan):
+            self._selected_row = None
             return
+        self._selected_row = self.plan[r]
+        self._finder_select_debounce.start()
 
-        row               = self.plan[r]
-        self._selected_row = row
+    def _start_finder_for_current_row(self):
+        row = self._selected_row
+        if row is None:
+            return
 
         fov1_w = int(self.in_fov1.value())
         fov1_h = int(self.in_fov1_h.value())
@@ -3372,6 +3538,19 @@ class MainWindow(QMainWindow):
         roll = float(self.in_roll.value())
 
         self.statusBar().showMessage(f"Generating finder charts for {row.name}…")
+        self._set_single_finder_fig(
+            1,
+            core.placeholder_figure(
+                f"Loading Finder FOV1 for {row.name}…", figsize=(7.8, 6.3)
+            ),
+        )
+        self._set_single_finder_fig(
+            2,
+            core.placeholder_figure(
+                f"Loading Finder FOV2 for {row.name}…", figsize=(7.8, 6.3)
+            ),
+        )
+        self._set_plot_action_state(self.btn_open_alt.isEnabled(), False, False)
         self._finder_request_id += 1
         req_id = self._finder_request_id
 
@@ -3396,8 +3575,14 @@ class MainWindow(QMainWindow):
     def on_finder_failed(self, request_id: int, msg: str):
         if request_id != self._finder_request_id:
             return
-        self.statusBar().showMessage("Finder chart failed.")
-        QMessageBox.warning(self, "Finder chart failed", msg)
+        self.statusBar().showMessage(f"Finder chart failed: {msg}", 7000)
+        self._set_single_finder_fig(
+            1, core.placeholder_figure("Finder FOV1 unavailable. Try Update Finder Charts.")
+        )
+        self._set_single_finder_fig(
+            2, core.placeholder_figure("Finder FOV2 unavailable. Try Update Finder Charts.")
+        )
+        self._set_plot_action_state(self.btn_open_alt.isEnabled(), False, False)
 
     def on_finder_finished(
         self,
@@ -3417,6 +3602,11 @@ class MainWindow(QMainWindow):
         )
 
         self._set_finder_figs(fig1, fig2)
+        self._set_plot_action_state(
+            self.btn_open_alt.isEnabled(),
+            data1 is not None and wcs1 is not None,
+            data2 is not None and wcs2 is not None,
+        )
 
         if self._open_finder_dialog_request is not None:
             dlg = self._open_finder_dialog_request
