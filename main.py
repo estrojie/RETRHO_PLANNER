@@ -713,9 +713,10 @@ class FinderInspectorDialog(QDialog):
         self.left_l.setSpacing(10)
 
         top  = QWidget()
-        tl   = QHBoxLayout(top)
+        tl   = QGridLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(10)
+        tl.setHorizontalSpacing(8)
+        tl.setVerticalSpacing(6)
 
         self.fov_spin = QSpinBox()
         self.fov_spin.setRange(1, 360)
@@ -746,7 +747,7 @@ class FinderInspectorDialog(QDialog):
                  and parent.in_flip_horizontal.isChecked())
         )
         style_toolbar_button(self.btn_flip_h)
-        self.btn_flip_h.toggled.connect(self._apply_roll_from_cache)
+        self.btn_flip_h.toggled.connect(lambda _on: self._apply_roll_from_cache())
 
         self.btn_flip_v = QPushButton("Flip V")
         self.btn_flip_v.setCheckable(True)
@@ -755,7 +756,7 @@ class FinderInspectorDialog(QDialog):
                  and parent.in_flip_vertical.isChecked())
         )
         style_toolbar_button(self.btn_flip_v)
-        self.btn_flip_v.toggled.connect(self._apply_roll_from_cache)
+        self.btn_flip_v.toggled.connect(lambda _on: self._apply_roll_from_cache())
 
         self.btn_copy_plot = QPushButton("Copy Plot")
         style_toolbar_button(self.btn_copy_plot)
@@ -764,23 +765,24 @@ class FinderInspectorDialog(QDialog):
             lambda: copy_figure_to_clipboard(self.canvas.figure, self,
                                              "Finder chart copied to clipboard."))
 
-        tl.addWidget(QLabel("FOV (arcmin):")); tl.addWidget(self.fov_spin)
-        tl.addWidget(btn_apply_fov)
-        tl.addSpacing(20)
-        tl.addWidget(QLabel("Roll:"));            tl.addWidget(self.roll_spin)
-        tl.addSpacing(20)
-        tl.addWidget(QLabel("Line thickness:")); tl.addWidget(self.lw_spin)
-        tl.addSpacing(12)
-        tl.addWidget(self.btn_flip_h)
-        tl.addWidget(self.btn_flip_v)
-        tl.addStretch(1)
-        tl.addWidget(self.btn_copy_plot)
+        tl.addWidget(QLabel("FOV (arcmin):"), 0, 0)
+        tl.addWidget(self.fov_spin, 0, 1)
+        tl.addWidget(btn_apply_fov, 0, 2)
+        tl.addWidget(QLabel("Roll:"), 0, 3)
+        tl.addWidget(self.roll_spin, 0, 4)
+        tl.addWidget(self.btn_copy_plot, 0, 5)
+        tl.addWidget(QLabel("Line thickness:"), 1, 0)
+        tl.addWidget(self.lw_spin, 1, 1)
+        tl.addWidget(self.btn_flip_h, 1, 2)
+        tl.addWidget(self.btn_flip_v, 1, 3)
+        tl.setColumnStretch(4, 1)
         self.left_l.addWidget(top)
 
         tools_box = QGroupBox("Tools")
-        tools_l   = QHBoxLayout(tools_box)
+        tools_l   = QGridLayout(tools_box)
         tools_l.setContentsMargins(10, 8, 10, 8)
-        tools_l.setSpacing(8)
+        tools_l.setHorizontalSpacing(8)
+        tools_l.setVerticalSpacing(6)
 
         def _mk(label, mode_name):
             b = QPushButton(label)
@@ -799,11 +801,13 @@ class FinderInspectorDialog(QDialog):
         self.btn_clear_ann.setIcon(std_icon(self, "SP_TrashIcon"))
         self.btn_clear_ann.clicked.connect(self._clear_annotations)
 
-        for w in (self.btn_rect, self.btn_circle, self.btn_free,
-                  self.btn_guide, self.btn_measure, self.btn_identify):
-            tools_l.addWidget(w)
-        tools_l.addStretch(1)
-        tools_l.addWidget(self.btn_clear_ann)
+        tool_buttons = (
+            self.btn_rect, self.btn_circle, self.btn_free,
+            self.btn_guide, self.btn_measure, self.btn_identify,
+        )
+        for i, w in enumerate(tool_buttons):
+            tools_l.addWidget(w, i // 3, i % 3)
+        tools_l.addWidget(self.btn_clear_ann, 2, 0, 1, 3)
         self.left_l.addWidget(tools_box)
 
         plotw = QWidget()
