@@ -447,14 +447,37 @@ def format_visibility_windows(
         return "—"
     return "; ".join(f"{t1.strftime(time_fmt)}–{t2.strftime(time_fmt)}" for t1, t2 in windows)
 
-def sky_conditions(timeout_s: float = 6.0) -> Dict[str, Any]:
-    out  = {}
-    obs  = get_observer()
-    site = get_site_config()
-    out.update(get_cloud_cover_now_next(site.lat, site.lon, timeout_s=timeout_s))
+def sky_conditions(
+    timeout_s: float = 6.0,
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
+) -> Dict[str, Any]:
+    """Return sky conditions for an immutable site/date snapshot."""
+    out = {}
+    site_cfg = site or get_site_config()
+    d = planning_date or get_planning_date()
 
-    tz     = ZoneInfo(site.timezone)
-    d      = get_planning_date()
+    if site is None:
+        obs = get_observer()
+    else:
+        loc = EarthLocation(
+            lat=site_cfg.lat * u.deg,
+            lon=site_cfg.lon * u.deg,
+            height=site_cfg.height_m * u.m,
+        )
+        obs = Observer(
+            location=loc,
+            timezone=site_cfg.timezone,
+            name=site_cfg.name,
+        )
+
+    out.update(
+        get_cloud_cover_now_next(
+            site_cfg.lat, site_cfg.lon, timeout_s=timeout_s
+        )
+    )
+
+    tz = ZoneInfo(site_cfg.timezone)
     anchor = Time(datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=tz))
 
     try:
@@ -1372,6 +1395,7 @@ class ExposureCalculatorConfig:
     read_noise_e: float = 9.3
     gain_e_per_adu: float = 0.37
     adc_max_adu: float = 65535.0
+    binning_factor: int = 1
     dark_current_e_s_pix: float = 1.35
     full_well_e: float = 25500.0
     saturation_fraction: float = 0.80
@@ -1630,6 +1654,8 @@ def calculate_exposure_times(
         raise ValueError("Camera gain must be positive.")
     if config.adc_max_adu <= 0.0:
         raise ValueError("Camera ADC maximum must be positive.")
+    if int(config.binning_factor) < 1:
+        raise ValueError("Binning factor must be at least 1.")
     if target.peak_line_factor <= 0.0:
         raise ValueError("Peak/mean line-brightness factor must be positive.")
     if (config.desired_peak_counts_adu is not None
@@ -1701,8 +1727,15 @@ def calculate_exposure_times(
             mag, spec.central_nm, spec.width_nm
         )
         line_flux = float(line_fluxes.get(spec.line_key or "", 0.0) or 0.0)
+        line_surface_flux = float(
+            line_surface_fluxes.get(spec.line_key or "", 0.0) or 0.0
+        )
+        effective_line_flux = line_flux
+        if is_extended and line_surface_flux > 0.0:
+            effective_line_flux += line_surface_flux * aperture_area_arcsec2
+
         line_photons = (
-            emission_line_photon_flux_m2_s(line_flux, spec.central_nm)
+            emission_line_photon_flux_m2_s(effective_line_flux, spec.central_nm)
             if spec.line_key else 0.0
         )
 
@@ -1759,14 +1792,12 @@ def calculate_exposure_times(
 
             peak_line_rate_e_s_arcsec2 = 0.0
             if spec.line_key:
-                line_surface_flux = float(
-                    line_surface_fluxes.get(spec.line_key, 0.0) or 0.0
-                )
-                if line_surface_flux <= 0.0 and line_flux > 0.0:
-                    line_surface_flux = line_flux / aperture_area_arcsec2
-                if line_surface_flux > 0.0:
+                peak_line_surface_flux = line_surface_flux
+                if peak_line_surface_flux <= 0.0 and effective_line_flux > 0.0:
+                    peak_line_surface_flux = effective_line_flux / aperture_area_arcsec2
+                if peak_line_surface_flux > 0.0:
                     peak_line_photons_arcsec2 = emission_line_photon_flux_m2_s(
-                        line_surface_flux * float(target.peak_line_factor),
+                        peak_line_surface_flux * float(target.peak_line_factor),
                         spec.central_nm,
                     )
                     peak_line_rate_e_s_arcsec2 = (
@@ -1786,8 +1817,12 @@ def calculate_exposure_times(
                 + sky_rate_e_s_arcsec2 * p**2
                 + max(0.0, float(config.dark_current_e_s_pix))
             )
+        binning_charge_factor = float(max(1, int(config.binning_factor)) ** 2)
         usable_well_e = max(
-            1.0, float(config.full_well_e) * float(config.saturation_fraction)
+            1.0,
+            float(config.full_well_e)
+            * binning_charge_factor
+            * float(config.saturation_fraction),
         )
         usable_adc_e = max(
             1.0,
@@ -1881,8 +1916,11 @@ def calculate_exposure_times(
             notes.append(
                 f"peak line brightness ×{float(target.peak_line_factor):g}"
             )
-        if line_flux > 0.0:
-            notes.append("line flux included")
+        if effective_line_flux > 0.0:
+            if line_surface_flux > 0.0:
+                notes.append("line surface flux included")
+            else:
+                notes.append("integrated line flux included")
         if desired_counts is not None:
             safe_peak_adu = usable_signal_e / gain
             if desired_counts > 65535.0:
@@ -1900,7 +1938,7 @@ def calculate_exposure_times(
             notes.append("stack subexposures to avoid saturation")
         if np.isfinite(total_time_s) and total_time_s < float(config.minimum_practical_exposure_s):
             notes.append("defocus or use a neutral-density strategy")
-        if name in {"H-alpha", "H-beta", "OIII", "SII"} and line_flux <= 0.0:
+        if name in {"H-alpha", "H-beta", "OIII", "SII"} and effective_line_flux <= 0.0:
             notes.append("continuum-only narrowband estimate")
 
         results.append({
@@ -1924,6 +1962,59 @@ def calculate_exposure_times(
         })
 
     return results
+
+def package_self_test() -> None:
+    """Offline packaged-feature smoke test used by CI release bundles."""
+    import importlib
+
+    # Dynamic imports that PyInstaller cannot infer from planner startup alone.
+    _get_simbad()
+    _get_vizier_client()
+    _get_skyview_class()
+    importlib.import_module("openpyxl")
+
+    # Exercise point and diffuse ETC paths.
+    point_results = calculate_exposure_times(
+        ExposureCalculatorConfig(),
+        ExposureTarget(reference_mag_ab=12.0, reference_band="Johnson V"),
+    )
+    if not point_results:
+        raise RuntimeError("Point-source exposure self-test returned no results.")
+
+    diffuse_results = calculate_exposure_times(
+        ExposureCalculatorConfig(),
+        ExposureTarget(
+            reference_mag_ab=21.0,
+            reference_band="Sloan r",
+            source_type="extended",
+            measurement_area_arcsec2=100.0,
+            peak_surface_brightness_mag_arcsec2=18.5,
+            second_reference_mag=21.5,
+            second_reference_band="Sloan g",
+        ),
+    )
+    if not diffuse_results:
+        raise RuntimeError("Diffuse-source exposure self-test returned no results.")
+
+    # Exercise rectangular finder reprojection without network access.
+    data = np.arange(64 * 64, dtype=float).reshape(64, 64)
+    wcs = WCS(naxis=2)
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.crpix = [32.5, 32.5]
+    wcs.wcs.crval = [180.0, 20.0]
+    wcs.wcs.cdelt = [-1.0 / 3600.0, 1.0 / 3600.0]
+    coord = SkyCoord(180.0 * u.deg, 20.0 * u.deg, frame="icrs")
+    fig = render_finder_figure_from_data(
+        coord, "Self Test", data, wcs, 15, "local",
+        roll_deg=17.0, fov_h_arcmin=20,
+        flip_horizontal=True,
+    )
+    try:
+        if not fig.axes:
+            raise RuntimeError("Finder self-test did not create an axis.")
+    finally:
+        plt.close(fig)
+
 
 def _norm_col(s: str) -> str:
     s = (s or "").replace("\n", " ").strip().lower()
