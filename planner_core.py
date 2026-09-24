@@ -1371,7 +1371,8 @@ class ExposureCalculatorConfig:
     pixel_scale_arcsec: float = 1.62
     read_noise_e: float = 9.3
     gain_e_per_adu: float = 0.37
-    dark_current_e_s_pix: float = 1.35 
+    adc_max_adu: float = 65535.0
+    dark_current_e_s_pix: float = 1.35
     full_well_e: float = 25500.0
     saturation_fraction: float = 0.80
     seeing_fwhm_arcsec: float = 10.3
@@ -1391,6 +1392,8 @@ class ExposureTarget:
     target_snr: float = 100.0
     airmass: float = 1.2
     line_fluxes_erg_s_cm2: Optional[Dict[str, float]] = None
+    line_surface_fluxes_erg_s_cm2_arcsec2: Optional[Dict[str, float]] = None
+    peak_line_factor: float = 1.0
     second_reference_mag: Optional[float] = None
     second_reference_band: Optional[str] = None
     source_type: str = "point"
@@ -1416,6 +1419,70 @@ def reference_magnitude_fnu_w_m2_hz(
     fnu0 = float(spec.zero_point_jy) * 1.0e-26
     return float(fnu0 * 10.0 ** (-0.4 * float(magnitude)))
 
+COLOR_MIN_WAVELENGTH_SEPARATION_RATIO = 1.03
+COLOR_MAX_EXTRAPOLATION_RATIO = 1.80
+
+
+def color_constraint_status(
+    reference_band: str,
+    second_reference_band: Optional[str],
+    filter_name: str,
+) -> tuple[bool, str]:
+    """Return whether a two-band color is safe to use for the requested filter."""
+    if not second_reference_band:
+        return False, "no second band"
+
+    ref_spec = get_reference_magnitude_band(reference_band)
+    second_spec = get_reference_magnitude_band(second_reference_band)
+    if ref_spec.key == second_spec.key:
+        return False, "same photometric band"
+
+    lam1 = float(ref_spec.central_nm)
+    lam2 = float(second_spec.central_nm)
+    lo, hi = min(lam1, lam2), max(lam1, lam2)
+    if hi / max(lo, 1e-12) < COLOR_MIN_WAVELENGTH_SEPARATION_RATIO:
+        return False, "bands are too close in wavelength"
+
+    lamf = float(EXPOSURE_FILTERS[str(filter_name)].central_nm)
+    if lo <= lamf <= hi:
+        return True, "interpolation"
+
+    nearest = lo if lamf < lo else hi
+    ratio = max(lamf, nearest) / max(min(lamf, nearest), 1e-12)
+    if ratio <= COLOR_MAX_EXTRAPOLATION_RATIO:
+        return True, "moderate extrapolation"
+    return False, "target filter is too far outside the color baseline"
+
+
+def _color_powerlaw_alpha(
+    reference_mag: float,
+    reference_band: str,
+    second_reference_mag: float,
+    second_reference_band: str,
+) -> Optional[float]:
+    ref_spec = get_reference_magnitude_band(reference_band)
+    second_spec = get_reference_magnitude_band(second_reference_band)
+    if ref_spec.key == second_spec.key:
+        return None
+
+    fnu_ref = reference_magnitude_fnu_w_m2_hz(reference_mag, ref_spec.key)
+    fnu_second = reference_magnitude_fnu_w_m2_hz(
+        second_reference_mag, second_spec.key
+    )
+    nu_ref = _LIGHT_C / (float(ref_spec.central_nm) * 1e-9)
+    nu_second = _LIGHT_C / (float(second_spec.central_nm) * 1e-9)
+    denom = np.log(nu_second / nu_ref)
+    if (
+        fnu_ref <= 0.0
+        or fnu_second <= 0.0
+        or not np.isfinite(fnu_ref + fnu_second + denom)
+        or abs(float(denom)) <= 1e-12
+    ):
+        return None
+    alpha = np.log(fnu_second / fnu_ref) / denom
+    return float(alpha) if np.isfinite(alpha) else None
+
+
 def estimate_filter_ab_magnitude(
     reference_mag_ab: float,
     reference_band: str,
@@ -1440,22 +1507,23 @@ def estimate_filter_ab_magnitude(
     fnu_filter = None
     if second_reference_mag is not None and second_reference_band:
         try:
-            second_spec = get_reference_magnitude_band(second_reference_band)
-            fnu_second = reference_magnitude_fnu_w_m2_hz(
-                float(second_reference_mag), second_spec.key
+            allowed, _reason = color_constraint_status(
+                ref_spec.key, second_reference_band, str(filter_name)
             )
-            nu_ref = _LIGHT_C / (float(ref_spec.central_nm) * 1e-9)
-            nu_second = _LIGHT_C / (float(second_spec.central_nm) * 1e-9)
-            nu_filter = _LIGHT_C / (float(filt_nm) * 1e-9)
-            denom = np.log(nu_second / nu_ref)
-            if (
-                fnu_ref > 0.0 and fnu_second > 0.0
-                and np.isfinite(fnu_ref + fnu_second + denom)
-                and abs(float(denom)) > 1e-12
-            ):
-                alpha = np.log(fnu_second / fnu_ref) / denom
-                if np.isfinite(alpha):
-                    fnu_filter = fnu_ref * (nu_filter / nu_ref) ** alpha
+            alpha = (
+                _color_powerlaw_alpha(
+                    float(reference_mag_ab),
+                    ref_spec.key,
+                    float(second_reference_mag),
+                    second_reference_band,
+                )
+                if allowed
+                else None
+            )
+            if alpha is not None:
+                nu_ref = _LIGHT_C / (float(ref_spec.central_nm) * 1e-9)
+                nu_filter = _LIGHT_C / (float(filt_nm) * 1e-9)
+                fnu_filter = fnu_ref * (nu_filter / nu_ref) ** alpha
         except Exception:
             fnu_filter = None
 
@@ -1560,6 +1628,10 @@ def calculate_exposure_times(
         raise ValueError("Target S/N must be positive.")
     if config.gain_e_per_adu <= 0.0:
         raise ValueError("Camera gain must be positive.")
+    if config.adc_max_adu <= 0.0:
+        raise ValueError("Camera ADC maximum must be positive.")
+    if target.peak_line_factor <= 0.0:
+        raise ValueError("Peak/mean line-brightness factor must be positive.")
     if (config.desired_peak_counts_adu is not None
             and float(config.desired_peak_counts_adu) <= 0.0):
         raise ValueError("Desired peak counts must be positive or disabled.")
@@ -1591,9 +1663,20 @@ def calculate_exposure_times(
     peak_fraction = float(np.clip(peak_fraction, 1e-6, 1.0))
 
     line_fluxes = target.line_fluxes_erg_s_cm2 or {}
+    line_surface_fluxes = target.line_surface_fluxes_erg_s_cm2_arcsec2 or {}
     results: List[Dict[str, Any]] = []
 
     for name, spec in EXPOSURE_FILTERS.items():
+        color_used = False
+        color_reason = ""
+        if target.second_reference_mag is not None and target.second_reference_band:
+            try:
+                color_used, color_reason = color_constraint_status(
+                    target.reference_band, target.second_reference_band, name
+                )
+            except Exception as exc:
+                color_reason = str(exc)
+
         mag = estimate_filter_ab_magnitude(
             target.reference_mag_ab,
             target.reference_band,
@@ -1674,8 +1757,26 @@ def calculate_exposure_times(
                     total_source_e_s / aperture_area_arcsec2
                 )
 
+            peak_line_rate_e_s_arcsec2 = 0.0
+            if spec.line_key:
+                line_surface_flux = float(
+                    line_surface_fluxes.get(spec.line_key, 0.0) or 0.0
+                )
+                if line_surface_flux <= 0.0 and line_flux > 0.0:
+                    line_surface_flux = line_flux / aperture_area_arcsec2
+                if line_surface_flux > 0.0:
+                    peak_line_photons_arcsec2 = emission_line_photon_flux_m2_s(
+                        line_surface_flux * float(target.peak_line_factor),
+                        spec.central_nm,
+                    )
+                    peak_line_rate_e_s_arcsec2 = (
+                        peak_line_photons_arcsec2
+                        * collecting_area_m2
+                        * throughput
+                    )
+
             peak_rate_e_s = (
-                source_surface_rate_e_s_arcsec2 * p**2
+                (source_surface_rate_e_s_arcsec2 + peak_line_rate_e_s_arcsec2) * p**2
                 + sky_rate_e_s_arcsec2 * p**2
                 + max(0.0, float(config.dark_current_e_s_pix))
             )
@@ -1685,8 +1786,21 @@ def calculate_exposure_times(
                 + sky_rate_e_s_arcsec2 * p**2
                 + max(0.0, float(config.dark_current_e_s_pix))
             )
-        usable_well = max(1.0, float(config.full_well_e) * float(config.saturation_fraction))
-        saturation_s = usable_well / peak_rate_e_s if peak_rate_e_s > 0 else float("inf")
+        usable_well_e = max(
+            1.0, float(config.full_well_e) * float(config.saturation_fraction)
+        )
+        usable_adc_e = max(
+            1.0,
+            float(config.adc_max_adu)
+            * float(config.gain_e_per_adu)
+            * float(config.saturation_fraction),
+        )
+        usable_signal_e = min(usable_well_e, usable_adc_e)
+        saturation_s = (
+            usable_signal_e / peak_rate_e_s
+            if peak_rate_e_s > 0
+            else float("inf")
+        )
         is_narrowband = name in {"H-alpha", "H-beta", "OIII", "SII"}
         configured_max = (
             float(config.max_narrowband_subexposure_s)
@@ -1759,11 +1873,18 @@ def calculate_exposure_times(
             else:
                 notes.append("mean surface brightness used for peak counts")
         if target.second_reference_mag is not None and target.second_reference_band:
-            notes.append("color-constrained SED")
+            if color_used:
+                notes.append(f"color-constrained SED ({color_reason})")
+            else:
+                notes.append(f"color not applied: {color_reason or 'invalid constraint'}")
+        if is_extended and line_flux > 0.0 and float(target.peak_line_factor) > 1.0:
+            notes.append(
+                f"peak line brightness ×{float(target.peak_line_factor):g}"
+            )
         if line_flux > 0.0:
             notes.append("line flux included")
         if desired_counts is not None:
-            safe_peak_adu = usable_well / gain
+            safe_peak_adu = usable_signal_e / gain
             if desired_counts > 65535.0:
                 notes.append("desired counts exceed 16-bit ADC range")
             if desired_counts > safe_peak_adu:
