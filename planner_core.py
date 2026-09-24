@@ -1581,6 +1581,18 @@ def emission_line_photon_flux_m2_s(line_flux_erg_s_cm2: float, wavelength_nm: fl
     photon_energy_j = _PLANCK_H * _LIGHT_C / (float(wavelength_nm) * 1e-9)
     return flux_w_m2 / photon_energy_j if photon_energy_j > 0 else 0.0
 
+def rayleigh_to_erg_s_cm2_arcsec2(rayleigh: float, wavelength_nm: float) -> float:
+    """Convert line surface brightness in Rayleighs to cgs per square arcsecond."""
+    r = max(0.0, float(rayleigh))
+    photons_cm2_s_sr = r * 1.0e6 / (4.0 * np.pi)
+    arcsec2_per_sr = (180.0 * 3600.0 / np.pi) ** 2
+    photons_cm2_s_arcsec2 = photons_cm2_s_sr / arcsec2_per_sr
+    photon_energy_erg = (
+        _PLANCK_H * _LIGHT_C / (float(wavelength_nm) * 1e-9)
+    ) * 1.0e7
+    return float(photons_cm2_s_arcsec2 * photon_energy_erg)
+
+
 def _solve_exposure_time_s(
     source_rate_e_s: float,
     background_rate_e_s: float,
