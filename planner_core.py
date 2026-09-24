@@ -958,6 +958,145 @@ def _row_first(row: Any, names: tuple[str, ...]) -> Any:
                 continue
     return None
 
+def _friendly_identifier_priority(identifier: str) -> tuple[int, int, str]:
+    """Rank SIMBAD aliases by how useful they are to a human observer."""
+    raw = re.sub(r"\s+", " ", str(identifier or "")).strip()
+    up = raw.upper()
+    if not raw:
+        return (99, 999, "")
+
+    # SIMBAD's NAME entries are established/common proper names.
+    if up.startswith("NAME "):
+        return (0, len(raw), raw[5:].strip())
+
+    cleaned = raw
+    if cleaned.startswith("* "):
+        cleaned = cleaned[2:].strip()
+    cup = cleaned.upper()
+
+    # Common observing/catalog identifiers before machine-generated IDs.
+    if re.match(r"^\d+\s+[A-Z]{3,4}$", cup):
+        return (1, len(cleaned), cleaned)  # Flamsteed, e.g. 55 Cnc
+    if cup.startswith(("HD ", "HR ", "HIP ", "GJ ", "GL ", "BD", "CD", "CPD")):
+        return (2, len(cleaned), cleaned)
+    if cup.startswith(("SAO ", "WDS ", "LHS ", "LTT ", "TYC ")):
+        return (3, len(cleaned), cleaned)
+    if raw.startswith("* "):
+        return (4, len(cleaned), cleaned)  # Bayer/designation from SIMBAD
+    if cup.startswith("GAIA "):
+        return (20, len(cleaned), cleaned)
+    return (6, len(cleaned), cleaned)
+
+
+def _simbad_identifier_aliases(seed_identifier: str) -> List[str]:
+    """Return SIMBAD aliases for one identifier, best-effort and non-fatal."""
+    seed = _catalog_text(seed_identifier)
+    if not seed:
+        return []
+    try:
+        table = _get_simbad().query_objectids(seed)
+    except Exception:
+        return []
+    if table is None:
+        return []
+
+    aliases: List[str] = []
+    for row in table:
+        raw = _row_first(row, ("ID", "id", "identifier"))
+        text = _catalog_text(raw)
+        # _catalog_text removes NAME; preserve NAME semantics if possible by
+        # reading the raw string separately.
+        try:
+            raw_text = re.sub(r"\s+", " ", str(raw)).strip()
+        except Exception:
+            raw_text = text
+        value = raw_text if raw_text else text
+        if value and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
+def _enrich_candidate_identifiers(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Prefer proper/common/catalog names over Gaia source IDs."""
+    result = dict(candidate)
+    existing = [str(x) for x in result.get("aliases", []) if str(x).strip()]
+
+    # Prefer a SIMBAD/non-Gaia seed when the cross-catalog merge already found one.
+    seed_candidates = sorted(
+        existing,
+        key=lambda x: (
+            1 if x.upper().startswith("GAIA ") else 0,
+            _friendly_identifier_priority(x),
+        ),
+    )
+    seeds = seed_candidates[:2] or [str(result.get("main_id", ""))]
+
+    aliases = list(existing)
+    for seed in seeds:
+        for alias in _simbad_identifier_aliases(seed):
+            if alias not in aliases:
+                aliases.append(alias)
+
+    # If the merged result only had Gaia/Tycho, ask SIMBAD for the closest
+    # object at the selected astrometric position and use that as another seed.
+    if not any(not a.upper().startswith(("GAIA ", "TYC ")) for a in aliases):
+        try:
+            table = _get_simbad().query_region(result["coord"], radius=3.0 * u.arcsec)
+            if table is not None and len(table):
+                simbad_id = _catalog_text(_row_first(table[0], ("MAIN_ID", "main_id")))
+                if simbad_id:
+                    if simbad_id not in aliases:
+                        aliases.append(simbad_id)
+                    for alias in _simbad_identifier_aliases(simbad_id):
+                        if alias not in aliases:
+                            aliases.append(alias)
+        except Exception:
+            pass
+
+    ranked = []
+    seen_friendly = set()
+    for alias in aliases:
+        priority, length, friendly = _friendly_identifier_priority(alias)
+        friendly = _catalog_text(friendly)
+        if not friendly:
+            continue
+        key = friendly.upper()
+        if key in seen_friendly:
+            continue
+        seen_friendly.add(key)
+        ranked.append((priority, length, friendly))
+    ranked.sort()
+
+    if ranked:
+        result["main_id"] = ranked[0][2]
+        result["aliases"] = [entry[2] for entry in ranked]
+        # A friendly SIMBAD alias is descriptive even when Gaia supplied the
+        # best astrometry/magnitude.
+        if ranked[0][0] < 20:
+            result["name_source"] = "SIMBAD identifiers"
+    return result
+
+
+def placeholder_figure(message: str, figsize=(7.8, 4.9)) -> plt.Figure:
+    """Dark themed placeholder used before a plot/finder chart exists."""
+    fig = plt.figure(figsize=figsize)
+    fig.patch.set_facecolor("#111318")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("#111318")
+    ax.text(
+        0.5, 0.5, str(message),
+        ha="center", va="center",
+        color="#9aa4b2", fontsize=11,
+        transform=ax.transAxes,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_color("#2f3540")
+    plt.close(fig)
+    return fig
+
+
 def _identifier_priority(identifier: str, catalog: str) -> int:
     ident = _catalog_text(identifier)
     up = ident.upper()
@@ -1190,6 +1329,7 @@ def identify_star_at_coord(
         )
 
     best = min(pool, key=_brightness_key)
+    best = _enrich_candidate_identifiers(best)
     mag = best.get("mag")
     band = best.get("mag_band")
     return {
