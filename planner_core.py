@@ -1395,6 +1395,7 @@ class ExposureTarget:
     second_reference_band: Optional[str] = None
     source_type: str = "point"
     measurement_area_arcsec2: Optional[float] = None
+    peak_surface_brightness_mag_arcsec2: Optional[float] = None
 
 
 def _planck_bnu_at_lambda(lambda_nm: float, temperature_k: float) -> float:
@@ -1647,11 +1648,32 @@ def calculate_exposure_times(
         read_variance_e2 = n_pix * max(0.0, float(config.read_noise_e)) ** 2
 
         if is_extended:
-            # Assume approximately uniform surface brightness over the supplied
-            # measurement region when estimating per-pixel saturation.
-            source_surface_rate_e_s_arcsec2 = (
-                total_source_e_s / aperture_area_arcsec2
-            )
+            # S/N uses the mean surface brightness over the measurement area.
+            # Saturation can instead use an independently supplied peak surface
+            # brightness, which handles bright nuclei, knots, and filaments.
+            if target.peak_surface_brightness_mag_arcsec2 is not None:
+                peak_mag = estimate_filter_ab_magnitude(
+                    float(target.peak_surface_brightness_mag_arcsec2),
+                    target.reference_band,
+                    name,
+                    target.spectrum_model,
+                    target.effective_temperature_k,
+                    target.second_reference_mag,
+                    target.second_reference_band,
+                )
+                peak_continuum_photons_arcsec2 = ab_magnitude_photon_flux_m2_s(
+                    peak_mag, spec.central_nm, spec.width_nm
+                )
+                source_surface_rate_e_s_arcsec2 = (
+                    peak_continuum_photons_arcsec2
+                    * collecting_area_m2
+                    * throughput
+                )
+            else:
+                source_surface_rate_e_s_arcsec2 = (
+                    total_source_e_s / aperture_area_arcsec2
+                )
+
             peak_rate_e_s = (
                 source_surface_rate_e_s_arcsec2 * p**2
                 + sky_rate_e_s_arcsec2 * p**2
@@ -1732,7 +1754,10 @@ def calculate_exposure_times(
             notes.append(
                 f"surface brightness over {aperture_area_arcsec2:.1f} arcsec^2"
             )
-            notes.append("uniform diffuse source assumed for peak counts")
+            if target.peak_surface_brightness_mag_arcsec2 is not None:
+                notes.append("peak surface brightness used for saturation")
+            else:
+                notes.append("mean surface brightness used for peak counts")
         if target.second_reference_mag is not None and target.second_reference_band:
             notes.append("color-constrained SED")
         if line_flux > 0.0:
