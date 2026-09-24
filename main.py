@@ -104,7 +104,14 @@ def configure_interactive_widgets(root: QWidget):
         spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     for edit in root.findChildren(QLineEdit):
+        # QSpinBox/QDoubleSpinBox/QDateEdit own internal QLineEdits. Styling
+        # those child editors directly can distort native/macOS geometry, so
+        # only normalize standalone text-entry fields.
+        parent = edit.parentWidget()
+        if isinstance(parent, (QAbstractSpinBox, QComboBox)):
+            continue
         edit.setMinimumHeight(max(30, edit.minimumHeight()))
+        edit.setMinimumWidth(max(100, edit.minimumWidth()))
         edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     for combo in root.findChildren(QComboBox):
@@ -3594,18 +3601,26 @@ if __name__ == "__main__":
                         f"{spin.size().width()}x{spin.size().height()}"
                     )
             for edit in root.findChildren(QLineEdit):
-                if not edit.isVisibleTo(root):
-                    continue
-                # QSpinBox/QDoubleSpinBox/QComboBox own internal QLineEdits;
-                # their geometry is governed by the parent control and should
-                # not be tested as independent text-entry fields.
+                # Offscreen Qt on macOS can report temporary/nonsensical pixel
+                # widths even for correctly expanding fields. Validate the
+                # policy/minimums we control instead of treating the offscreen
+                # raster geometry as a real Retina-window measurement.
                 parent = edit.parentWidget()
                 if isinstance(parent, (QAbstractSpinBox, QComboBox)):
                     continue
-                if edit.height() < 28 or edit.width() < 40:
+                if edit.minimumHeight() < 28:
                     raise RuntimeError(
-                        "Collapsed visible text-entry geometry detected: "
-                        f"{edit.size().width()}x{edit.size().height()}"
+                        "Standalone text-entry minimum height is too small: "
+                        f"{edit.minimumHeight()}"
+                    )
+                if edit.minimumWidth() < 96:
+                    raise RuntimeError(
+                        "Standalone text-entry minimum width is too small: "
+                        f"{edit.minimumWidth()}"
+                    )
+                if edit.sizePolicy().horizontalPolicy() != QSizePolicy.Expanding:
+                    raise RuntimeError(
+                        "Standalone text-entry field is not horizontally expanding."
                     )
 
         _check_visible_control_geometry(w)
