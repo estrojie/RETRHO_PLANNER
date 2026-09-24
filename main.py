@@ -663,7 +663,8 @@ class FinderInspectorDialog(QDialog):
         raw_wcs:      WCS | None        = None,
         raw_coord:    SkyCoord | None   = None,
         raw_survey:   str               = "",
-        raw_fov:      int               = 90,
+        raw_fov_w:    int               = 90,
+        raw_fov_h:    int | None        = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"Finder Inspector (FOV{which_fov})")
@@ -676,7 +677,8 @@ class FinderInspectorDialog(QDialog):
         self._raw_wcs    = raw_wcs
         self._raw_coord  = raw_coord
         self._raw_survey = raw_survey
-        self._raw_fov    = raw_fov
+        self._raw_fov_w  = int(raw_fov_w)
+        self._raw_fov_h  = int(raw_fov_h if raw_fov_h is not None else raw_fov_w)
 
         self.mode         = None
         self._press_xy    = None
@@ -718,10 +720,16 @@ class FinderInspectorDialog(QDialog):
         tl.setHorizontalSpacing(8)
         tl.setVerticalSpacing(6)
 
-        self.fov_spin = QSpinBox()
-        self.fov_spin.setRange(1, 360)
-        self.fov_spin.setValue(int(parent.in_fov1.value()) if which_fov == 1
-                               else int(parent.in_fov2.value()))
+        self.fov_w_spin = QSpinBox()
+        self.fov_w_spin.setRange(1, 180)
+        self.fov_h_spin = QSpinBox()
+        self.fov_h_spin.setRange(1, 180)
+        if which_fov == 1:
+            self.fov_w_spin.setValue(int(parent.in_fov1.value()))
+            self.fov_h_spin.setValue(int(parent.in_fov1_h.value()))
+        else:
+            self.fov_w_spin.setValue(int(parent.in_fov2.value()))
+            self.fov_h_spin.setValue(int(parent.in_fov2_h.value()))
 
         btn_apply_fov = QPushButton("Update FOV")
         style_toolbar_button(btn_apply_fov)
@@ -765,17 +773,20 @@ class FinderInspectorDialog(QDialog):
             lambda: copy_figure_to_clipboard(self.canvas.figure, self,
                                              "Finder chart copied to clipboard."))
 
-        tl.addWidget(QLabel("FOV (arcmin):"), 0, 0)
-        tl.addWidget(self.fov_spin, 0, 1)
-        tl.addWidget(btn_apply_fov, 0, 2)
-        tl.addWidget(QLabel("Roll:"), 0, 3)
-        tl.addWidget(self.roll_spin, 0, 4)
-        tl.addWidget(self.btn_copy_plot, 0, 5)
+        tl.addWidget(QLabel("FOV W:"), 0, 0)
+        tl.addWidget(self.fov_w_spin, 0, 1)
+        tl.addWidget(QLabel("H:"), 0, 2)
+        tl.addWidget(self.fov_h_spin, 0, 3)
+        tl.addWidget(QLabel("arcmin"), 0, 4)
+        tl.addWidget(btn_apply_fov, 0, 5)
+        tl.addWidget(QLabel("Roll:"), 0, 6)
+        tl.addWidget(self.roll_spin, 0, 7)
+        tl.addWidget(self.btn_copy_plot, 0, 8)
         tl.addWidget(QLabel("Line thickness:"), 1, 0)
         tl.addWidget(self.lw_spin, 1, 1)
         tl.addWidget(self.btn_flip_h, 1, 2)
         tl.addWidget(self.btn_flip_v, 1, 3)
-        tl.setColumnStretch(4, 1)
+        tl.setColumnStretch(7, 1)
         self.left_l.addWidget(top)
 
         tools_box = QGroupBox("Tools")
@@ -922,14 +933,17 @@ class FinderInspectorDialog(QDialog):
         self._cid_leave = self.canvas.mpl_connect("figure_leave_event",    self._on_figure_leave)
 
     def set_figure(self, fig, raw_data=None, raw_wcs=None, raw_coord=None,
-                   raw_survey="", raw_fov=90):
+                   raw_survey="", raw_fov_w=90, raw_fov_h=None):
         self._clear_annotations()
         if raw_data is not None:
             self._raw_data   = raw_data
             self._raw_wcs    = raw_wcs
             self._raw_coord  = raw_coord
             self._raw_survey = raw_survey
-            self._raw_fov    = raw_fov
+            self._raw_fov_w  = int(raw_fov_w)
+            self._raw_fov_h  = int(raw_fov_h if raw_fov_h is not None else raw_fov_w)
+            self.fov_w_spin.setValue(self._raw_fov_w)
+            self.fov_h_spin.setValue(self._raw_fov_h)
         self._replace_plot(fig)
         self._label_counter = 0
         self._update_title_wcs_hint()
@@ -1439,8 +1453,9 @@ class FinderInspectorDialog(QDialog):
             fig = core.render_finder_figure_from_data(
                 self._raw_coord, name,
                 self._raw_data, self._raw_wcs,
-                self._raw_fov, self._raw_survey,
+                self._raw_fov_w, self._raw_survey,
                 roll_deg=new_roll,
+                fov_h_arcmin=self._raw_fov_h,
                 flip_horizontal=self.btn_flip_h.isChecked(),
                 flip_vertical=self.btn_flip_v.isChecked(),
             )
@@ -1476,18 +1491,25 @@ class FinderInspectorDialog(QDialog):
         if self.parent_window._selected_row is None:
             QMessageBox.information(self, "No target", "Select a target first.")
             return
-        new_fov  = int(self.fov_spin.value())
+        new_fov_w = int(self.fov_w_spin.value())
+        new_fov_h = int(self.fov_h_spin.value())
         new_roll = float(self.roll_spin.value())
 
         try: self.parent_window.in_roll.setValue(new_roll)
         except Exception: pass
 
         if self.which_fov == 1:
-            try: self.parent_window.in_fov1.setValue(new_fov)
-            except Exception: pass
+            try:
+                self.parent_window.in_fov1.setValue(new_fov_w)
+                self.parent_window.in_fov1_h.setValue(new_fov_h)
+            except Exception:
+                pass
         else:
-            try: self.parent_window.in_fov2.setValue(new_fov)
-            except Exception: pass
+            try:
+                self.parent_window.in_fov2.setValue(new_fov_w)
+                self.parent_window.in_fov2_h.setValue(new_fov_h)
+            except Exception:
+                pass
 
         self.parent_window._open_finder_dialog_request = self
         self.parent_window.on_row_selected()
@@ -2364,8 +2386,24 @@ class MainWindow(QMainWindow):
 
         self.in_min_alt = QSpinBox();   self.in_min_alt.setRange(0, 90);   self.in_min_alt.setValue(int(core.DEFAULT_MIN_ALT_DEG))
         self.in_max_alt = QSpinBox();   self.in_max_alt.setRange(0, 90);   self.in_max_alt.setValue(int(core.DEFAULT_MAX_ALT_DEG))
-        self.in_fov1    = QSpinBox();   self.in_fov1.setRange(1, 360);     self.in_fov1.setValue(core.DEFAULT_FOV1_ARCMIN)
-        self.in_fov2    = QSpinBox();   self.in_fov2.setRange(1, 360);     self.in_fov2.setValue(core.DEFAULT_FOV2_ARCMIN)
+        self.in_fov1    = QSpinBox();   self.in_fov1.setRange(1, 180);     self.in_fov1.setValue(core.DEFAULT_FOV1_ARCMIN)
+        self.in_fov1_h  = QSpinBox();   self.in_fov1_h.setRange(1, 180);   self.in_fov1_h.setValue(core.DEFAULT_FOV1_ARCMIN)
+        self.in_fov2    = QSpinBox();   self.in_fov2.setRange(1, 180);     self.in_fov2.setValue(core.DEFAULT_FOV2_ARCMIN)
+        self.in_fov2_h  = QSpinBox();   self.in_fov2_h.setRange(1, 180);   self.in_fov2_h.setValue(core.DEFAULT_FOV2_ARCMIN)
+
+        def _fov_pair(width_spin, height_spin):
+            holder = QWidget()
+            row = QHBoxLayout(holder)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addWidget(width_spin)
+            row.addWidget(QLabel("×"))
+            row.addWidget(height_spin)
+            row.addWidget(QLabel("arcmin"))
+            return holder
+
+        fov1_pair = _fov_pair(self.in_fov1, self.in_fov1_h)
+        fov2_pair = _fov_pair(self.in_fov2, self.in_fov2_h)
 
         self.in_roll = QDoubleSpinBox()
         self.in_roll.setRange(-360.0, 360.0)
@@ -2395,8 +2433,8 @@ class MainWindow(QMainWindow):
 
         settings_form.addRow("Min alt (°):",           self.in_min_alt)
         settings_form.addRow("Max alt (°):",           self.in_max_alt)
-        settings_form.addRow("Finder FOV1 (arcmin):",  self.in_fov1)
-        settings_form.addRow("Finder FOV2 (arcmin):",  self.in_fov2)
+        settings_form.addRow("Finder FOV1 (W × H):",   fov1_pair)
+        settings_form.addRow("Finder FOV2 (W × H):",   fov2_pair)
         settings_form.addRow("Finder roll:",           self.in_roll)
         settings_form.addRow("Finder source:",         self.in_survey)
         settings_form.addRow("Flip finder:",            flip_row)
@@ -2711,7 +2749,9 @@ class MainWindow(QMainWindow):
         self.in_min_alt.setValue(self._default_min_alt)
         self.in_max_alt.setValue(self._default_max_alt)
         self.in_fov1.setValue(self._default_fov1)
+        self.in_fov1_h.setValue(self._default_fov1)
         self.in_fov2.setValue(self._default_fov2)
+        self.in_fov2_h.setValue(self._default_fov2)
         self.in_roll.setValue(self._default_roll)
         self.in_survey.setCurrentText(self._default_survey)
         self.in_flip_horizontal.setChecked(self._default_flip_horizontal)
@@ -2876,8 +2916,10 @@ class MainWindow(QMainWindow):
         row               = self.plan[r]
         self._selected_row = row
 
-        fov1 = int(self.in_fov1.value())
-        fov2 = int(self.in_fov2.value())
+        fov1_w = int(self.in_fov1.value())
+        fov1_h = int(self.in_fov1_h.value())
+        fov2_w = int(self.in_fov2.value())
+        fov2_h = int(self.in_fov2_h.value())
         mode = self.in_survey.currentText()
         roll = float(self.in_roll.value())
 
@@ -2887,7 +2929,7 @@ class MainWindow(QMainWindow):
 
         worker = FinderWorker(
             req_id, row.name, row.ra, row.dec,
-            fov1, fov1, fov2, fov2, mode, roll_deg=roll,
+            fov1_w, fov1_h, fov2_w, fov2_h, mode, roll_deg=roll,
             flip_horizontal=self.in_flip_horizontal.isChecked(),
             flip_vertical=self.in_flip_vertical.isChecked(),
         )
@@ -2918,8 +2960,14 @@ class MainWindow(QMainWindow):
         if request_id != self._finder_request_id:
             return
 
-        self._raw_finder[1] = (data1, wcs1, coord, lbl1, int(self.in_fov1.value()))
-        self._raw_finder[2] = (data2, wcs2, coord, lbl2, int(self.in_fov2.value()))
+        self._raw_finder[1] = (
+            data1, wcs1, coord, lbl1,
+            int(self.in_fov1.value()), int(self.in_fov1_h.value())
+        )
+        self._raw_finder[2] = (
+            data2, wcs2, coord, lbl2,
+            int(self.in_fov2.value()), int(self.in_fov2_h.value())
+        )
 
         self._set_finder_figs(fig1, fig2)
 
@@ -2927,7 +2975,7 @@ class MainWindow(QMainWindow):
             dlg = self._open_finder_dialog_request
             if isinstance(dlg, FinderInspectorDialog):
                 which  = dlg.which_fov
-                raw    = self._raw_finder.get(which, (None, None, None, "", 90))
+                raw    = self._raw_finder.get(which, (None, None, None, "", 90, 90))
                 fig    = fig1 if which == 1 else fig2
                 dlg.set_figure(fig, *raw)
             self._open_finder_dialog_request = None
@@ -2944,12 +2992,13 @@ class MainWindow(QMainWindow):
             raw = self._raw_finder.get(which)
             if raw is None:
                 continue
-            data, wcs, coord, lbl, fov = raw
+            data, wcs, coord, lbl, fov_w, fov_h = raw
             if data is None or wcs is None or coord is None:
                 continue
             try:
                 fig = core.render_finder_figure_from_data(
-                    coord, name, data, wcs, fov, lbl, roll_deg=roll,
+                    coord, name, data, wcs, fov_w, lbl, roll_deg=roll,
+                    fov_h_arcmin=fov_h,
                     flip_horizontal=self.in_flip_horizontal.isChecked(),
                     flip_vertical=self.in_flip_vertical.isChecked())
                 if which == 1:
@@ -2980,21 +3029,26 @@ class MainWindow(QMainWindow):
             existing.raise_(); existing.activateWindow()
             return
 
-        raw    = self._raw_finder.get(which_fov, (None, None, None, "", 90))
-        data, wcs, coord, lbl, fov = raw
+        raw    = self._raw_finder.get(which_fov, (None, None, None, "", 90, 90))
+        data, wcs, coord, lbl, fov_w, fov_h = raw
         roll   = float(self.in_roll.value())
         row    = self._selected_row
         name   = row.name if row else ""
 
         if data is not None and wcs is not None and coord is not None:
-            fig = core.render_finder_figure_from_data(coord, name, data, wcs, fov, lbl, roll_deg=roll)
+            fig = core.render_finder_figure_from_data(
+                coord, name, data, wcs, fov_w, lbl, roll_deg=roll,
+                fov_h_arcmin=fov_h,
+                flip_horizontal=self.in_flip_horizontal.isChecked(),
+                flip_vertical=self.in_flip_vertical.isChecked(),
+            )
         else:
             fig = core.plt.figure(figsize=(7.8, 6.3))
 
         dlg = FinderInspectorDialog(
             self, fig, which_fov,
             raw_data=data, raw_wcs=wcs, raw_coord=coord,
-            raw_survey=lbl, raw_fov=fov,
+            raw_survey=lbl, raw_fov_w=fov_w, raw_fov_h=fov_h,
         )
         if which_fov == 1:
             self._finder_dialog_fov1 = dlg
