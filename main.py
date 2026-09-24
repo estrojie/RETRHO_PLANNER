@@ -453,6 +453,22 @@ class StarIdWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+class PhotometryWorker(QThread):
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, name: str):
+        super().__init__()
+        self.name = str(name or "").strip()
+
+    def run(self):
+        try:
+            value = core.lookup_v_magnitude(self.name)
+            self.finished.emit(value)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class SkyConditionsWorker(QThread):
     finished = Signal(int, object)
     failed   = Signal(int, str)
@@ -1612,6 +1628,7 @@ class ExposureCalculatorDialog(QDialog):
         self._results = []
         self._updating_target_fields = False
         self._magnitude_is_user_valid = False
+        self._photometry_workers: set = set()
         self.setWindowTitle("RHO Exposure Time Calculator")
         self._size_for_available_screen(parent)
 
@@ -1746,8 +1763,22 @@ class ExposureCalculatorDialog(QDialog):
 
         target_grid.addWidget(QLabel("Planner target (optional):"), 0, 0)
         target_grid.addWidget(self.etc_target_selector, 0, 1, 1, 3)
+        self.etc_btn_lookup_mag = QPushButton("Look Up V")
+        self.etc_btn_lookup_mag.setToolTip(
+            "Query SIMBAD for Johnson V photometry. Planning itself does not require this lookup."
+        )
+        self.etc_btn_lookup_mag.clicked.connect(self._lookup_target_vmag)
+        style_toolbar_button(self.etc_btn_lookup_mag)
+
+        target_name_row = QWidget()
+        target_name_l = QHBoxLayout(target_name_row)
+        target_name_l.setContentsMargins(0, 0, 0, 0)
+        target_name_l.setSpacing(8)
+        target_name_l.addWidget(self.etc_target_name, 1)
+        target_name_l.addWidget(self.etc_btn_lookup_mag)
+
         target_grid.addWidget(QLabel("Target name:"), 1, 0)
-        target_grid.addWidget(self.etc_target_name, 1, 1, 1, 3)
+        target_grid.addWidget(target_name_row, 1, 1, 1, 3)
 
         target_grid.addWidget(QLabel("Magnitude:"), 2, 0)
         target_grid.addWidget(self.etc_ref_mag, 2, 1)
@@ -1759,7 +1790,8 @@ class ExposureCalculatorDialog(QDialog):
         target_grid.addWidget(QLabel("Source geometry:"), 3, 2)
         target_grid.addWidget(self.etc_source_geometry, 3, 3)
 
-        target_grid.addWidget(QLabel("Extended input:"), 4, 0)
+        self.etc_lbl_extended_input = QLabel("Extended input:")
+        target_grid.addWidget(self.etc_lbl_extended_input, 4, 0)
         target_grid.addWidget(self.etc_extended_input, 4, 1, 1, 3)
 
         area_row = QWidget()
@@ -1773,8 +1805,10 @@ class ExposureCalculatorDialog(QDialog):
         area_l.addWidget(self.etc_major_axis)
         area_l.addWidget(QLabel("Minor"))
         area_l.addWidget(self.etc_minor_axis)
-        target_grid.addWidget(QLabel("Extended aperture:"), 5, 0)
-        target_grid.addWidget(area_row, 5, 1, 1, 3)
+        self.etc_lbl_extended_aperture = QLabel("Extended aperture:")
+        self.etc_area_row = area_row
+        target_grid.addWidget(self.etc_lbl_extended_aperture, 5, 0)
+        target_grid.addWidget(self.etc_area_row, 5, 1, 1, 3)
 
         peak_sb_row = QWidget()
         peak_sb_l = QHBoxLayout(peak_sb_row)
@@ -1783,8 +1817,10 @@ class ExposureCalculatorDialog(QDialog):
         peak_sb_l.addWidget(self.etc_use_peak_surface)
         peak_sb_l.addWidget(self.etc_peak_surface_mag)
         peak_sb_l.addStretch(1)
-        target_grid.addWidget(QLabel("Brightest region:"), 6, 0)
-        target_grid.addWidget(peak_sb_row, 6, 1, 1, 3)
+        self.etc_lbl_brightest_region = QLabel("Brightest region:")
+        self.etc_peak_sb_row = peak_sb_row
+        target_grid.addWidget(self.etc_lbl_brightest_region, 6, 0)
+        target_grid.addWidget(self.etc_peak_sb_row, 6, 1, 1, 3)
 
         color_row = QWidget()
         color_l = QHBoxLayout(color_row)
@@ -2142,6 +2178,15 @@ class ExposureCalculatorDialog(QDialog):
         surface_mode = extended and input_mode == "surface"
         integrated_mode = extended and input_mode == "integrated"
 
+        # Hide irrelevant extended-source rows entirely for compact/point sources.
+        if hasattr(self, "etc_lbl_extended_input"):
+            self.etc_lbl_extended_input.setVisible(extended)
+            self.etc_extended_input.setVisible(extended)
+            self.etc_lbl_extended_aperture.setVisible(extended)
+            self.etc_area_row.setVisible(extended)
+            self.etc_lbl_brightest_region.setVisible(extended)
+            self.etc_peak_sb_row.setVisible(extended)
+
         self.etc_extended_input.setEnabled(extended)
         self.etc_surface_area.setEnabled(surface_mode)
         self.etc_major_axis.setEnabled(integrated_mode)
@@ -2233,6 +2278,60 @@ class ExposureCalculatorDialog(QDialog):
             str(getattr(row, "ra", "") or "").strip(),
             str(getattr(row, "dec", "") or "").strip(),
         )
+
+    def _lookup_target_vmag(self):
+        name = self.etc_target_name.text().strip()
+        if not name:
+            QMessageBox.information(
+                self, "Target required", "Enter or select a named target first."
+            )
+            return
+
+        self.etc_btn_lookup_mag.setEnabled(False)
+        self.etc_btn_lookup_mag.setText("Looking up…")
+        worker = PhotometryWorker(name)
+        self._photometry_workers.add(worker)
+
+        def _finish(value):
+            try:
+                mag = self._finite_float(value)
+                if mag is None:
+                    QMessageBox.information(
+                        self,
+                        "V magnitude unavailable",
+                        f"No usable Johnson V magnitude was returned for {name}. "
+                        "Enter a catalogue magnitude manually and select its band.",
+                    )
+                    return
+                self._updating_target_fields = True
+                try:
+                    self.etc_ref_mag.setValue(mag)
+                    self._set_reference_band("Johnson V")
+                    self._magnitude_is_user_valid = True
+                finally:
+                    self._updating_target_fields = False
+                self.etc_summary.setText(
+                    f"Loaded Johnson V = {mag:.3f} mag for {name}. "
+                    "Press Calculate Exposure Plan."
+                )
+            finally:
+                self.etc_btn_lookup_mag.setEnabled(True)
+                self.etc_btn_lookup_mag.setText("Look Up V")
+
+        def _fail(message):
+            self.etc_btn_lookup_mag.setEnabled(True)
+            self.etc_btn_lookup_mag.setText("Look Up V")
+            QMessageBox.warning(self, "Photometry lookup failed", message)
+
+        def _cleanup():
+            self._photometry_workers.discard(worker)
+            worker.deleteLater()
+
+        worker.finished.connect(_finish)
+        worker.finished.connect(lambda *_: _cleanup())
+        worker.failed.connect(_fail)
+        worker.failed.connect(lambda *_: _cleanup())
+        worker.start()
 
     def _on_manual_magnitude_changed(self, _value):
         if not self._updating_target_fields:
@@ -2656,6 +2755,12 @@ class ExposureCalculatorDialog(QDialog):
                     item.setToolTip(str(value))
                 self.etc_table.setItem(r, c, item)
         self.etc_table.resizeRowsToContents()
+
+    def closeEvent(self, event):
+        for worker in list(self._photometry_workers):
+            stop_worker_for_exit(worker)
+        self._photometry_workers.clear()
+        event.accept()
 
     def copy_results(self):
         if not self._results:
