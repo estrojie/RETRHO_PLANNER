@@ -1965,9 +1965,11 @@ def package_self_test() -> None:
     import importlib
 
     # Dynamic imports that PyInstaller cannot infer from planner startup alone.
-    _get_simbad()
-    _get_vizier_client()
-    _get_skyview_class()
+    # Import modules only; constructing some astroquery clients can trigger
+    # schema/network work in certain releases.
+    importlib.import_module("astroquery.simbad")
+    importlib.import_module("astroquery.vizier")
+    importlib.import_module("astroquery.skyview")
     importlib.import_module("openpyxl")
 
     # Exercise point and diffuse ETC paths.
