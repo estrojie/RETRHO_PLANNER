@@ -3580,16 +3580,51 @@ if __name__ == "__main__":
         if etc.etc_snr.buttonSymbols() != QAbstractSpinBox.UpDownArrows:
             raise RuntimeError("Spin-box arrow controls are not enabled.")
 
-        for spin in w.findChildren(QAbstractSpinBox) + etc.findChildren(QAbstractSpinBox):
-            if spin.height() < 28 or spin.width() < 40:
-                raise RuntimeError(
-                    f"Collapsed spin-box geometry detected: {spin.size().width()}x{spin.size().height()}"
-                )
-        for edit in w.findChildren(QLineEdit) + etc.findChildren(QLineEdit):
-            if edit.height() < 28 or edit.width() < 40:
-                raise RuntimeError(
-                    f"Collapsed text-entry geometry detected: {edit.size().width()}x{edit.size().height()}"
-                )
+        def _check_visible_control_geometry(root):
+            # Hidden tab-page widgets often retain Qt's tiny default geometry
+            # until their page is shown. Only judge controls that are actually
+            # laid out and visible to the window.
+            for spin in root.findChildren(QAbstractSpinBox):
+                if not spin.isVisibleTo(root):
+                    continue
+                if spin.height() < 28 or spin.width() < 40:
+                    raise RuntimeError(
+                        "Collapsed visible spin-box geometry detected: "
+                        f"{spin.metaObject().className()} "
+                        f"{spin.size().width()}x{spin.size().height()}"
+                    )
+            for edit in root.findChildren(QLineEdit):
+                if not edit.isVisibleTo(root):
+                    continue
+                # QSpinBox/QDoubleSpinBox/QComboBox own internal QLineEdits;
+                # their geometry is governed by the parent control and should
+                # not be tested as independent text-entry fields.
+                parent = edit.parentWidget()
+                if isinstance(parent, (QAbstractSpinBox, QComboBox)):
+                    continue
+                if edit.height() < 28 or edit.width() < 40:
+                    raise RuntimeError(
+                        "Collapsed visible text-entry geometry detected: "
+                        f"{edit.size().width()}x{edit.size().height()}"
+                    )
+
+        _check_visible_control_geometry(w)
+        _check_visible_control_geometry(etc)
+
+        # Exercise the Advanced page too so its controls receive a real layout
+        # before checking geometry. Nested advanced tabs are visited as well.
+        etc.etc_tabs.setCurrentIndex(1)
+        app.processEvents()
+        for tabs in etc.findChildren(QTabWidget):
+            if tabs is etc.etc_tabs:
+                continue
+            original = tabs.currentIndex()
+            for index in range(tabs.count()):
+                tabs.setCurrentIndex(index)
+                app.processEvents()
+                _check_visible_control_geometry(etc)
+            tabs.setCurrentIndex(original)
+        _check_visible_control_geometry(etc)
 
         etc.close()
         w.close()
