@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import astropy.units as u
@@ -105,6 +106,34 @@ class ExposureRegressionTests(unittest.TestCase):
             ax = fig.axes[0]
             ny, nx = ax._rho_data_shape
             self.assertGreater(ny, nx)
+        finally:
+            core.plt.close(fig)
+
+
+class FinderIdentificationTests(unittest.TestCase):
+    def test_friendly_simbad_name_beats_gaia_identifier(self):
+        candidate = {
+            "main_id": "Gaia DR3 123456789",
+            "aliases": ["Gaia DR3 123456789"],
+            "catalog": "Gaia DR3",
+            "coord": SkyCoord(133.1492 * u.deg, 28.3308 * u.deg, frame="icrs"),
+        }
+        with patch.object(
+            core,
+            "_simbad_identifier_aliases",
+            return_value=["NAME Copernicus", "55 Cnc", "HD 75732"],
+        ):
+            enriched = core._enrich_candidate_identifiers(candidate)
+        self.assertEqual(enriched["main_id"], "Copernicus")
+        self.assertIn("55 Cnc", enriched["aliases"])
+
+    def test_placeholder_figure_uses_dark_background(self):
+        fig = core.placeholder_figure("No data yet")
+        try:
+            rgba = fig.get_facecolor()
+            self.assertLess(rgba[0], 0.2)
+            self.assertLess(rgba[1], 0.2)
+            self.assertLess(rgba[2], 0.2)
         finally:
             core.plt.close(fig)
 
