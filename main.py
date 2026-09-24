@@ -1658,7 +1658,12 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_target_name = QLineEdit(target_name or "")
         self.etc_target_name.setPlaceholderText("Any planned or unplanned object")
         self.etc_target_name.textEdited.connect(self._mark_manual_target)
-        self.etc_ref_mag = self._dspin(-10.0, 40.0, 12.0, 3, " mag")
+        self.etc_ref_mag = self._dspin(-30.0, 40.0, -30.0, 3, " mag")
+        self.etc_ref_mag.setSpecialValueText("Enter magnitude")
+        self.etc_ref_mag.setToolTip(
+            "Required source magnitude or surface brightness. Select a planned "
+            "target with photometry, use Look Up V, or enter a value manually."
+        )
         self.etc_ref_mag.valueChanged.connect(self._on_manual_magnitude_changed)
         self.etc_ref_band = QComboBox()
         self._populate_reference_bands()
