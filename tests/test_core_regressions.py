@@ -43,6 +43,12 @@ class ExposureRegressionTests(unittest.TestCase):
         r1 = {r["filter"]: r for r in core.calculate_exposure_times(cfg, with_line)}
         self.assertGreater(r1["H-alpha"]["source_rate_e_s"], r0["H-alpha"]["source_rate_e_s"])
 
+    def test_rayleigh_conversion_is_positive_and_wavelength_dependent(self):
+        ha = core.rayleigh_to_erg_s_cm2_arcsec2(100.0, 656.3)
+        hb = core.rayleigh_to_erg_s_cm2_arcsec2(100.0, 486.1)
+        self.assertGreater(ha, 0.0)
+        self.assertGreater(hb, ha)
+
     def test_adc_limit_caps_saturation(self):
         target = core.ExposureTarget(
             reference_mag_ab=8.0,
