@@ -748,6 +748,8 @@ def render_finder_figure_from_data(
     survey_label: str,
     roll_deg:     float      = 0.0,
     fov_h_arcmin: int | None = None,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
 ) -> plt.Figure:
     fov_w = _clamp_fov(fov_w_arcmin)
     fov_h = _clamp_fov(fov_h_arcmin if fov_h_arcmin is not None else fov_w)
@@ -799,6 +801,10 @@ def render_finder_figure_from_data(
     ax.set_facecolor("black")
     ax.imshow(plot_masked, origin="lower", vmin=vmin, vmax=vmax,
               cmap="gray", interpolation="nearest")
+    if flip_horizontal:
+        ax.invert_xaxis()
+    if flip_vertical:
+        ax.invert_yaxis()
 
     try:
         for axis_idx, pos in ((0, "b"), (1, "l")):
@@ -818,12 +824,21 @@ def render_finder_figure_from_data(
     title   = f"{name} — {survey_label} — {fov_str}"
     if abs(float(roll_deg)) > 1e-9:
         title += f" — Roll={float(roll_deg):.1f}°"
+    flips = []
+    if flip_horizontal:
+        flips.append("H")
+    if flip_vertical:
+        flips.append("V")
+    if flips:
+        title += " — Flip " + "+".join(flips)
     fig.suptitle(title, color="white", fontsize=13, y=0.985)
 
     ax._rho_roll_deg     = 0.0
     ax._rho_data_shape   = np.asarray(data_plot).shape
     ax._rho_wcs          = wcs_plot
     ax._rho_display_roll = float(roll_deg)
+    ax._rho_flip_horizontal = bool(flip_horizontal)
+    ax._rho_flip_vertical = bool(flip_vertical)
 
     ax.format_coord = lambda x, y: format_finder_cursor(wcs_plot, x, y, include_pixel=True)
 
