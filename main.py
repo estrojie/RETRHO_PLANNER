@@ -1615,7 +1615,10 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_major_axis = self._dspin(0.1, 1.0e6, 20.0, 1, " arcsec")
         self.etc_minor_axis = self._dspin(0.1, 1.0e6, 10.0, 1, " arcsec")
         self.etc_major_axis.setToolTip("Full major-axis diameter of the measurement region.")
-        self.etc_minor_axis.setToolTip("Full minor-axis diameter of the measurement region.")
+        self.etc_minor_axis.setToolTip(
+            "Full minor-axis diameter of the measurement region. Integrated magnitude "
+            "is converted to mean surface brightness using an elliptical area πab/4."
+        )
         self.etc_major_axis.setEnabled(False)
         self.etc_minor_axis.setEnabled(False)
 
@@ -2068,6 +2071,8 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_major_axis.setEnabled(integrated_mode)
         self.etc_minor_axis.setEnabled(integrated_mode)
         self.etc_use_peak_surface.setEnabled(extended)
+        if hasattr(self, "etc_peak_line_factor"):
+            self.etc_peak_line_factor.setEnabled(extended)
         self.etc_peak_surface_mag.setEnabled(
             extended and self.etc_use_peak_surface.isChecked()
         )
@@ -2102,7 +2107,7 @@ class ExposureCalculatorDialog(QDialog):
             for field, value in zip(fields, values):
                 field.setValue(float(value))
         for field in fields:
-            field.setEnabled(is_custom)
+            field.setEnabled(is_custom or field is self.etc_obstruction)
 
     def _sync_spectrum_controls(self):
         if hasattr(self, "etc_temperature"):
@@ -3500,6 +3505,15 @@ if __name__ == "__main__":
         # controls without entering the event loop or making network requests.
         if not hasattr(w, "btn_plan") or not hasattr(w, "btn_update_finders"):
             raise RuntimeError("Main-window UI self-test failed.")
+
+        etc = ExposureCalculatorDialog(w)
+        if not etc.etc_target_selector.isEnabled():
+            raise RuntimeError("Manual ETC target selector unexpectedly disabled.")
+        if "Manual" not in etc.etc_target_selector.itemText(0):
+            raise RuntimeError("Manual ETC target mode is missing.")
+        if etc.etc_snr.buttonSymbols() != QAbstractSpinBox.UpDownArrows:
+            raise RuntimeError("Spin-box arrow controls are not enabled.")
+        etc.close()
         w.close()
         sys.exit(0)
 
