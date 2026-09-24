@@ -1254,6 +1254,24 @@ REFERENCE_MAGNITUDE_BANDS: Dict[str, ReferenceMagnitudeBandSpec] = {
     "Sloan z": ReferenceMagnitudeBandSpec(
         "Sloan z", "Sloan z (AB)", "Sloan", 913.0, 3631.0, "AB"),
 
+    "Pan-STARRS g": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS g", "Pan-STARRS g (AB)", "Pan-STARRS", 481.0, 3631.0, "AB"),
+    "Pan-STARRS r": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS r", "Pan-STARRS r (AB)", "Pan-STARRS", 617.0, 3631.0, "AB"),
+    "Pan-STARRS i": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS i", "Pan-STARRS i (AB)", "Pan-STARRS", 752.0, 3631.0, "AB"),
+    "Pan-STARRS z": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS z", "Pan-STARRS z (AB)", "Pan-STARRS", 866.0, 3631.0, "AB"),
+    "Pan-STARRS y": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS y", "Pan-STARRS y (AB)", "Pan-STARRS", 962.0, 3631.0, "AB"),
+
+    "2MASS J": ReferenceMagnitudeBandSpec(
+        "2MASS J", "2MASS J (Vega)", "2MASS", 1235.0, 1594.0, "Vega"),
+    "2MASS H": ReferenceMagnitudeBandSpec(
+        "2MASS H", "2MASS H (Vega)", "2MASS", 1662.0, 1024.0, "Vega"),
+    "2MASS Ks": ReferenceMagnitudeBandSpec(
+        "2MASS Ks", "2MASS K_s (Vega)", "2MASS", 2159.0, 666.7, "Vega"),
+
     "H-alpha": ReferenceMagnitudeBandSpec(
         "H-alpha", "H-alpha (AB)", "Narrowband", 656.3, 3631.0, "AB"),
     "H-beta": ReferenceMagnitudeBandSpec(
@@ -1271,6 +1289,7 @@ _REFERENCE_BAND_ALIASES_EXACT: Dict[str, str] = {
     "G": "Gaia G", "BP": "Gaia BP", "RP": "Gaia RP",
     "u": "Sloan u", "g": "Sloan g", "r": "Sloan r",
     "i": "Sloan i", "z": "Sloan z",
+    "J": "2MASS J", "H": "2MASS H", "Ks": "2MASS Ks",
 }
 
 _REFERENCE_BAND_ALIASES_NORMALIZED: Dict[str, str] = {
@@ -1289,6 +1308,16 @@ _REFERENCE_BAND_ALIASES_NORMALIZED: Dict[str, str] = {
     "sloan r": "Sloan r", "sdss r": "Sloan r", "rprime": "Sloan r",
     "sloan i": "Sloan i", "sdss i": "Sloan i", "iprime": "Sloan i",
     "sloan z": "Sloan z", "sdss z": "Sloan z", "zprime": "Sloan z",
+    "pan starrs g": "Pan-STARRS g", "ps1 g": "Pan-STARRS g", "ps g": "Pan-STARRS g",
+    "pan starrs r": "Pan-STARRS r", "ps1 r": "Pan-STARRS r", "ps r": "Pan-STARRS r",
+    "pan starrs i": "Pan-STARRS i", "ps1 i": "Pan-STARRS i", "ps i": "Pan-STARRS i",
+    "pan starrs z": "Pan-STARRS z", "ps1 z": "Pan-STARRS z", "ps z": "Pan-STARRS z",
+    "pan starrs y": "Pan-STARRS y", "ps1 y": "Pan-STARRS y", "ps y": "Pan-STARRS y",
+    "2mass j": "2MASS J", "jmag": "2MASS J",
+    "2mass h": "2MASS H", "hmag": "2MASS H",
+    "2mass ks": "2MASS Ks", "2mass k": "2MASS Ks", "ksmag": "2MASS Ks",
+    "apass b": "Johnson B", "apass v": "Johnson V",
+    "apass g": "Sloan g", "apass r": "Sloan r", "apass i": "Sloan i",
     "halpha": "H-alpha", "h alpha": "H-alpha", "h-alpha": "H-alpha",
     "hbeta": "H-beta", "h beta": "H-beta", "h-beta": "H-beta",
     "oiii": "OIII", "o iii": "OIII", "sii": "SII", "s ii": "SII",
@@ -1319,7 +1348,7 @@ def get_reference_magnitude_band(value: str) -> ReferenceMagnitudeBandSpec:
 def reference_magnitude_band_groups() -> List[Tuple[str, List[ReferenceMagnitudeBandSpec]]]:
     """Ordered groups used by the exposure-calculator combo box."""
     groups: List[Tuple[str, List[ReferenceMagnitudeBandSpec]]] = []
-    for family in ("Johnson / Cousins", "Gaia DR3", "Sloan", "Narrowband"):
+    for family in ("Johnson / Cousins", "Gaia DR3", "Sloan", "Pan-STARRS", "2MASS", "Narrowband"):
         specs = [s for s in REFERENCE_MAGNITUDE_BANDS.values() if s.family == family]
         if specs:
             groups.append((family, specs))
@@ -1362,6 +1391,10 @@ class ExposureTarget:
     target_snr: float = 100.0
     airmass: float = 1.2
     line_fluxes_erg_s_cm2: Optional[Dict[str, float]] = None
+    second_reference_mag: Optional[float] = None
+    second_reference_band: Optional[str] = None
+    source_type: str = "point"
+    measurement_area_arcsec2: Optional[float] = None
 
 
 def _planck_bnu_at_lambda(lambda_nm: float, temperature_k: float) -> float:
@@ -1388,21 +1421,54 @@ def estimate_filter_ab_magnitude(
     filter_name: str,
     spectrum_model: str = "blackbody",
     effective_temperature_k: float = 5800.0,
+    second_reference_mag: Optional[float] = None,
+    second_reference_band: Optional[str] = None,
 ) -> float:
+    """Estimate an AB magnitude in an RHO filter.
+
+    When a second observed magnitude is supplied, the two calibrated flux
+    densities define a local power-law color slope in f_nu.  This is preferable
+    to guessing a stellar temperature or flat spectrum when catalog color
+    information is available.  Without a second band, the selected blackbody
+    or flat-f_nu fallback is used.
+    """
     ref_spec = get_reference_magnitude_band(reference_band)
     fnu_ref = reference_magnitude_fnu_w_m2_hz(reference_mag_ab, ref_spec.key)
-    model = str(spectrum_model or "flat_fnu").strip().lower()
+    filt_nm = EXPOSURE_FILTERS[str(filter_name)].central_nm
 
-    if model in {"flat", "flat_fnu", "flat fnu", "constant fnu"}:
-        fnu_filter = fnu_ref
-    else:
-        filt_nm = EXPOSURE_FILTERS[str(filter_name)].central_nm
-        b_ref = _planck_bnu_at_lambda(ref_spec.central_nm, effective_temperature_k)
-        b_fil = _planck_bnu_at_lambda(filt_nm, effective_temperature_k)
-        if b_ref <= 0.0 or b_fil <= 0.0 or not np.isfinite(b_ref + b_fil):
+    fnu_filter = None
+    if second_reference_mag is not None and second_reference_band:
+        try:
+            second_spec = get_reference_magnitude_band(second_reference_band)
+            fnu_second = reference_magnitude_fnu_w_m2_hz(
+                float(second_reference_mag), second_spec.key
+            )
+            nu_ref = _LIGHT_C / (float(ref_spec.central_nm) * 1e-9)
+            nu_second = _LIGHT_C / (float(second_spec.central_nm) * 1e-9)
+            nu_filter = _LIGHT_C / (float(filt_nm) * 1e-9)
+            denom = np.log(nu_second / nu_ref)
+            if (
+                fnu_ref > 0.0 and fnu_second > 0.0
+                and np.isfinite(fnu_ref + fnu_second + denom)
+                and abs(float(denom)) > 1e-12
+            ):
+                alpha = np.log(fnu_second / fnu_ref) / denom
+                if np.isfinite(alpha):
+                    fnu_filter = fnu_ref * (nu_filter / nu_ref) ** alpha
+        except Exception:
+            fnu_filter = None
+
+    if fnu_filter is None:
+        model = str(spectrum_model or "flat_fnu").strip().lower()
+        if model in {"flat", "flat_fnu", "flat fnu", "constant fnu"}:
             fnu_filter = fnu_ref
         else:
-            fnu_filter = fnu_ref * (b_fil / b_ref)
+            b_ref = _planck_bnu_at_lambda(ref_spec.central_nm, effective_temperature_k)
+            b_fil = _planck_bnu_at_lambda(filt_nm, effective_temperature_k)
+            if b_ref <= 0.0 or b_fil <= 0.0 or not np.isfinite(b_ref + b_fil):
+                fnu_filter = fnu_ref
+            else:
+                fnu_filter = fnu_ref * (b_fil / b_ref)
 
     if not np.isfinite(fnu_filter) or fnu_filter <= 0.0:
         return float("inf")
@@ -1502,7 +1568,21 @@ def calculate_exposure_times(
     radius_arcsec = max(0.1, float(config.aperture_radius_fwhm) * seeing)
     sigma_arcsec = seeing / 2.354820045
     encircled = 1.0 - np.exp(-(radius_arcsec**2) / (2.0 * sigma_arcsec**2))
-    aperture_area_arcsec2 = np.pi * radius_arcsec**2
+
+    source_type = str(target.source_type or "point").strip().lower()
+    is_extended = source_type in {"extended", "diffuse", "nebula", "galaxy"}
+    if is_extended:
+        aperture_area_arcsec2 = max(
+            1e-6,
+            float(target.measurement_area_arcsec2 or 0.0),
+        )
+        if aperture_area_arcsec2 <= 1e-6:
+            raise ValueError(
+                "Extended/diffuse sources require a positive measurement area."
+            )
+    else:
+        aperture_area_arcsec2 = np.pi * radius_arcsec**2
+
     n_pix = max(1.0, aperture_area_arcsec2 / float(config.pixel_scale_arcsec) ** 2)
 
     p = float(config.pixel_scale_arcsec)
@@ -1519,6 +1599,8 @@ def calculate_exposure_times(
             name,
             target.spectrum_model,
             target.effective_temperature_k,
+            target.second_reference_mag,
+            target.second_reference_band,
         )
 
         atmospheric_transmission = 10.0 ** (
@@ -1540,8 +1622,20 @@ def calculate_exposure_times(
             if spec.line_key else 0.0
         )
 
-        total_source_e_s = (continuum_photons + line_photons) * collecting_area_m2 * throughput
-        source_rate_e_s = total_source_e_s * encircled
+        if is_extended:
+            # The input magnitude is interpreted as surface brightness
+            # (mag/arcsec^2). Optional line fluxes remain integrated over the
+            # user-selected measurement area.
+            continuum_total_photons = continuum_photons * aperture_area_arcsec2
+            total_source_e_s = (
+                continuum_total_photons + line_photons
+            ) * collecting_area_m2 * throughput
+            source_rate_e_s = total_source_e_s
+        else:
+            total_source_e_s = (
+                continuum_photons + line_photons
+            ) * collecting_area_m2 * throughput
+            source_rate_e_s = total_source_e_s * encircled
 
         sky_photons_arcsec2 = ab_magnitude_photon_flux_m2_s(
             spec.sky_ab_mag_arcsec2, spec.central_nm, spec.width_nm
@@ -1552,11 +1646,23 @@ def calculate_exposure_times(
         background_rate_e_s = sky_rate_e_s + dark_rate_e_s
         read_variance_e2 = n_pix * max(0.0, float(config.read_noise_e)) ** 2
 
-        peak_rate_e_s = (
-            total_source_e_s * peak_fraction
-            + sky_rate_e_s_arcsec2 * p**2
-            + max(0.0, float(config.dark_current_e_s_pix))
-        )
+        if is_extended:
+            # Assume approximately uniform surface brightness over the supplied
+            # measurement region when estimating per-pixel saturation.
+            source_surface_rate_e_s_arcsec2 = (
+                total_source_e_s / aperture_area_arcsec2
+            )
+            peak_rate_e_s = (
+                source_surface_rate_e_s_arcsec2 * p**2
+                + sky_rate_e_s_arcsec2 * p**2
+                + max(0.0, float(config.dark_current_e_s_pix))
+            )
+        else:
+            peak_rate_e_s = (
+                total_source_e_s * peak_fraction
+                + sky_rate_e_s_arcsec2 * p**2
+                + max(0.0, float(config.dark_current_e_s_pix))
+            )
         usable_well = max(1.0, float(config.full_well_e) * float(config.saturation_fraction))
         saturation_s = usable_well / peak_rate_e_s if peak_rate_e_s > 0 else float("inf")
         is_narrowband = name in {"H-alpha", "H-beta", "OIII", "SII"}
@@ -1622,6 +1728,13 @@ def calculate_exposure_times(
         )
 
         notes: List[str] = []
+        if is_extended:
+            notes.append(
+                f"surface brightness over {aperture_area_arcsec2:.1f} arcsec^2"
+            )
+            notes.append("uniform diffuse source assumed for peak counts")
+        if target.second_reference_mag is not None and target.second_reference_band:
+            notes.append("color-constrained SED")
         if line_flux > 0.0:
             notes.append("line flux included")
         if desired_counts is not None:
