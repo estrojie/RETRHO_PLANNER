@@ -455,7 +455,7 @@ class AltitudeInspectorDialog(QDialog):
                  and parent.in_flip_horizontal.isChecked())
         )
         style_toolbar_button(self.btn_flip_h)
-        self.btn_flip_h.toggled.connect(self._apply_roll_from_cache)
+        self.btn_flip_h.toggled.connect(lambda _on: self._apply_roll_from_cache())
 
         self.btn_flip_v = QPushButton("Flip V")
         self.btn_flip_v.setCheckable(True)
@@ -464,7 +464,7 @@ class AltitudeInspectorDialog(QDialog):
                  and parent.in_flip_vertical.isChecked())
         )
         style_toolbar_button(self.btn_flip_v)
-        self.btn_flip_v.toggled.connect(self._apply_roll_from_cache)
+        self.btn_flip_v.toggled.connect(lambda _on: self._apply_roll_from_cache())
 
         self.btn_copy_plot = QPushButton("Copy Plot")
         style_toolbar_button(self.btn_copy_plot)
@@ -1461,6 +1461,10 @@ class FinderInspectorDialog(QDialog):
                 except Exception: pass
                 try: self.parent_window.in_flip_vertical.blockSignals(False)
                 except Exception: pass
+            try:
+                self.parent_window._apply_roll_from_cache()
+            except Exception:
+                pass
         except Exception as e:
             QMessageBox.warning(self, "Roll update failed", str(e))
 
@@ -2375,8 +2379,8 @@ class MainWindow(QMainWindow):
 
         self.in_flip_horizontal = QCheckBox("Horizontal")
         self.in_flip_vertical = QCheckBox("Vertical")
-        self.in_flip_horizontal.toggled.connect(self._apply_roll_from_cache)
-        self.in_flip_vertical.toggled.connect(self._apply_roll_from_cache)
+        self.in_flip_horizontal.toggled.connect(lambda _on: self._apply_roll_from_cache())
+        self.in_flip_vertical.toggled.connect(lambda _on: self._apply_roll_from_cache())
         flip_row = QWidget()
         flip_l = QHBoxLayout(flip_row)
         flip_l.setContentsMargins(0, 0, 0, 0)
