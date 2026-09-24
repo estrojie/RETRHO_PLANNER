@@ -1739,19 +1739,18 @@ def calculate_exposure_times(
             if spec.line_key else 0.0
         )
 
+        continuum_source_e_s = continuum_photons * collecting_area_m2 * throughput
+        line_source_e_s = line_photons * collecting_area_m2 * throughput
+
         if is_extended:
-            # The input magnitude is interpreted as surface brightness
-            # (mag/arcsec^2). Optional line fluxes remain integrated over the
-            # user-selected measurement area.
-            continuum_total_photons = continuum_photons * aperture_area_arcsec2
-            total_source_e_s = (
-                continuum_total_photons + line_photons
-            ) * collecting_area_m2 * throughput
+            # The input magnitude is interpreted as surface brightness.
+            # Continuum is integrated across the measurement area; line inputs
+            # have already been converted to an integrated aperture flux above.
+            continuum_total_e_s = continuum_source_e_s * aperture_area_arcsec2
+            total_source_e_s = continuum_total_e_s + line_source_e_s
             source_rate_e_s = total_source_e_s
         else:
-            total_source_e_s = (
-                continuum_photons + line_photons
-            ) * collecting_area_m2 * throughput
+            total_source_e_s = continuum_source_e_s + line_source_e_s
             source_rate_e_s = total_source_e_s * encircled
 
         sky_photons_arcsec2 = ab_magnitude_photon_flux_m2_s(
@@ -1786,9 +1785,7 @@ def calculate_exposure_times(
                     * throughput
                 )
             else:
-                source_surface_rate_e_s_arcsec2 = (
-                    total_source_e_s / aperture_area_arcsec2
-                )
+                source_surface_rate_e_s_arcsec2 = continuum_source_e_s
 
             peak_line_rate_e_s_arcsec2 = 0.0
             if spec.line_key:
@@ -1923,8 +1920,8 @@ def calculate_exposure_times(
                 notes.append("integrated line flux included")
         if desired_counts is not None:
             safe_peak_adu = usable_signal_e / gain
-            if desired_counts > 65535.0:
-                notes.append("desired counts exceed 16-bit ADC range")
+            if desired_counts > float(config.adc_max_adu):
+                notes.append("desired counts exceed configured ADC maximum")
             if desired_counts > safe_peak_adu:
                 notes.append("desired counts exceed safe-well target; saturation cap used")
             elif count_target_s > configured_max:
