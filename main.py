@@ -739,6 +739,24 @@ class FinderInspectorDialog(QDialog):
         self.roll_spin.setValue(float(parent.in_roll.value()) if hasattr(parent, "in_roll") else 0.0)
         self.roll_spin.valueChanged.connect(lambda _: self._roll_timer.start())
 
+        self.btn_flip_h = QPushButton("Flip H")
+        self.btn_flip_h.setCheckable(True)
+        self.btn_flip_h.setChecked(
+            bool(hasattr(parent, "in_flip_horizontal")
+                 and parent.in_flip_horizontal.isChecked())
+        )
+        style_toolbar_button(self.btn_flip_h)
+        self.btn_flip_h.toggled.connect(self._apply_roll_from_cache)
+
+        self.btn_flip_v = QPushButton("Flip V")
+        self.btn_flip_v.setCheckable(True)
+        self.btn_flip_v.setChecked(
+            bool(hasattr(parent, "in_flip_vertical")
+                 and parent.in_flip_vertical.isChecked())
+        )
+        style_toolbar_button(self.btn_flip_v)
+        self.btn_flip_v.toggled.connect(self._apply_roll_from_cache)
+
         self.btn_copy_plot = QPushButton("Copy Plot")
         style_toolbar_button(self.btn_copy_plot)
         self.btn_copy_plot.setIcon(std_icon(self, "SP_DialogSaveButton"))
@@ -2367,7 +2385,7 @@ class MainWindow(QMainWindow):
         flip_l.addWidget(self.in_flip_vertical)
         flip_l.addStretch(1)
 
-        settings_form.addRow("Min alt (°):"           self.in_min_alt)
+        settings_form.addRow("Min alt (°):",           self.in_min_alt)
         settings_form.addRow("Max alt (°):",           self.in_max_alt)
         settings_form.addRow("Finder FOV1 (arcmin):",  self.in_fov1)
         settings_form.addRow("Finder FOV2 (arcmin):",  self.in_fov2)
