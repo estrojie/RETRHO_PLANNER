@@ -63,7 +63,7 @@ docker run --rm \
     # Exercise the actual X11/XCB path.  The Mint 21.3 failure occurred during
     # xkb_x11_keymap_new_from_device(), which an offscreen test cannot catch.
     set +e
-    xvfb-run -a -s "-screen 0 1280x800x24" \
+    xvfb-run -a -s "-screen 0 1024x768x24" \
       timeout 15s /app/RHOPlanner >/tmp/rho-x11.stdout 2>/tmp/rho-x11.stderr
     x11_code=$?
     set -e
