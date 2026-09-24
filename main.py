@@ -85,6 +85,14 @@ def fit_window_to_screen(widget: QWidget, preferred_w: int, preferred_h: int,
 
 def configure_interactive_widgets(root: QWidget):
     """Normalize controls across macOS/Windows/Linux and expose clickable affordances."""
+    widgets = [root] + root.findChildren(QWidget)
+    for widget in widgets:
+        layout = widget.layout()
+        if isinstance(layout, QFormLayout):
+            layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
     for btn in root.findChildren(QPushButton):
         btn.setCursor(Qt.PointingHandCursor)
         btn.setMinimumHeight(max(30, btn.minimumHeight()))
@@ -1717,6 +1725,9 @@ class ExposureCalculatorDialog(QDialog):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
+        advanced_tabs = QTabWidget()
+        layout.addWidget(advanced_tabs, 1)
+
         inst_box = QGroupBox("Instrument Profile")
         inst_form = QFormLayout(inst_box)
         inst_form.setVerticalSpacing(7)
@@ -1750,7 +1761,7 @@ class ExposureCalculatorDialog(QDialog):
         inst_form.addRow("Dark current:", self.etc_dark)
         inst_form.addRow("Full well:", self.etc_full_well)
         inst_form.addRow("Use well up to:", self.etc_well_fraction)
-        layout.addWidget(inst_box)
+        advanced_tabs.addTab(self._scrollable(inst_box), "Instrument")
 
         obs_box = QGroupBox("Exact Observing Assumptions")
         obs_form = QFormLayout(obs_box)
@@ -1770,7 +1781,7 @@ class ExposureCalculatorDialog(QDialog):
         obs_form.addRow("Maximum broadband subexposure:", self.etc_max_broadband_sub)
         obs_form.addRow("Maximum narrowband subexposure:", self.etc_max_narrowband_sub)
         obs_form.addRow("Minimum practical exposure:", self.etc_min_exp)
-        layout.addWidget(obs_box)
+        advanced_tabs.addTab(self._scrollable(obs_box), "Observing")
 
         source_box = QGroupBox("Spectral and Emission-Line Assumptions")
         source_form = QFormLayout(source_box)
@@ -1797,9 +1808,8 @@ class ExposureCalculatorDialog(QDialog):
             spin = self._dspin(0.0, 1.0e9, 0.0, 4, " x10^-14")
             self.etc_line_flux[filt] = spin
             source_form.addRow(f"{filt} line flux:", spin)
-        layout.addWidget(source_box)
-        layout.addStretch(1)
-        return self._scrollable(page)
+        advanced_tabs.addTab(self._scrollable(source_box), "Spectrum / Lines")
+        return page
 
     @staticmethod
     def _dspin(lo, hi, value, decimals=2, suffix="") -> QDoubleSpinBox:
@@ -2378,7 +2388,14 @@ class MainWindow(QMainWindow):
         style_primary_button(self.btn_exposure)
         left_l.addWidget(self.btn_exposure)
         left_l.addStretch(1)
-        return left
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(left)
+        scroll.setMinimumWidth(250)
+        return scroll
 
     def _build_center_panel(self) -> QWidget:
         center   = QWidget()
