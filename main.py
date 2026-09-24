@@ -320,6 +320,8 @@ class FinderWorker(QThread):
         fov2_w: int, fov2_h: int,
         mode:     str,
         roll_deg: float = 0.0,
+        flip_horizontal: bool = False,
+        flip_vertical: bool = False,
     ):
         super().__init__()
         self.request_id = request_id
@@ -329,6 +331,8 @@ class FinderWorker(QThread):
         self.fov2_w, self.fov2_h = fov2_w, fov2_h
         self.mode     = mode
         self.roll_deg = float(roll_deg)
+        self.flip_horizontal = bool(flip_horizontal)
+        self.flip_vertical = bool(flip_vertical)
 
     def run(self):
         try:
@@ -342,7 +346,9 @@ class FinderWorker(QThread):
             if data1 is not None and wcs1 is not None:
                 fig1 = core.render_finder_figure_from_data(
                     rt.coord, rt.display_name, data1, wcs1,
-                    self.fov1_w, lbl1, self.roll_deg, fov_h_arcmin=self.fov1_h)
+                    self.fov1_w, lbl1, self.roll_deg, fov_h_arcmin=self.fov1_h,
+                    flip_horizontal=self.flip_horizontal,
+                    flip_vertical=self.flip_vertical)
             else:
                 fig1 = core._empty_finder_figure(rt.display_name, self.fov1_w, self.fov1_h)
                 data1, wcs1, lbl1 = None, None, ""
@@ -350,7 +356,9 @@ class FinderWorker(QThread):
             if data2 is not None and wcs2 is not None:
                 fig2 = core.render_finder_figure_from_data(
                     rt.coord, rt.display_name, data2, wcs2,
-                    self.fov2_w, lbl2, self.roll_deg, fov_h_arcmin=self.fov2_h)
+                    self.fov2_w, lbl2, self.roll_deg, fov_h_arcmin=self.fov2_h,
+                    flip_horizontal=self.flip_horizontal,
+                    flip_vertical=self.flip_vertical)
             else:
                 fig2 = core._empty_finder_figure(rt.display_name, self.fov2_w, self.fov2_h)
                 data2, wcs2, lbl2 = None, None, ""
@@ -2175,8 +2183,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Observing Planner (Desktop)")
-        self.resize(1650, 920)
-        self.setMinimumSize(1500, 840)
+        fit_window_to_screen(self, 1650, 920, min_w=900, min_h=600)
         self.statusBar().showMessage("Ready")
 
         self.plan:            List[PlanRow] = []
@@ -2220,6 +2227,7 @@ class MainWindow(QMainWindow):
         # Apply local defaults immediately, but do not block the first paint on
         # network/weather work.  Sky conditions are fetched after the window
         # enters the event loop.
+        configure_interactive_widgets(self)
         self.apply_date_location(initial=True)
         QTimer.singleShot(250, self.refresh_sky)
 
@@ -2247,6 +2255,8 @@ class MainWindow(QMainWindow):
         self._default_fov2    = int(core.DEFAULT_FOV2_ARCMIN)
         self._default_roll    = 0.0
         self._default_survey  = "DSS"
+        self._default_flip_horizontal = False
+        self._default_flip_vertical = False
 
         self.lat_spin    = QDoubleSpinBox(); self.lat_spin.setRange(-90.0, 90.0);     self.lat_spin.setDecimals(6);   self.lat_spin.setValue(site.lat)
         self.lon_spin    = QDoubleSpinBox(); self.lon_spin.setRange(-180.0, 180.0);   self.lon_spin.setDecimals(6);   self.lon_spin.setValue(site.lon)
@@ -2260,6 +2270,7 @@ class MainWindow(QMainWindow):
         self.btn_apply = QPushButton("Apply date/location")
         self.btn_apply.setIcon(std_icon(self, "SP_DialogApplyButton"))
         self.btn_apply.clicked.connect(self.apply_date_location)
+        style_primary_button(self.btn_apply)
 
         self.btn_reset = QPushButton("Reset defaults")
         self.btn_reset.setIcon(std_icon(self, "SP_DialogResetButton"))
@@ -2319,12 +2330,25 @@ class MainWindow(QMainWindow):
         self.in_survey.setToolTip("Survey used for finder charts. Pan-STARRS is deeper but not full-sky.")
         self.in_survey.currentIndexChanged.connect(self.refresh_finders_for_selected)
 
-        settings_form.addRow("Min alt (°):",           self.in_min_alt)
+        self.in_flip_horizontal = QCheckBox("Horizontal")
+        self.in_flip_vertical = QCheckBox("Vertical")
+        self.in_flip_horizontal.toggled.connect(self._apply_roll_from_cache)
+        self.in_flip_vertical.toggled.connect(self._apply_roll_from_cache)
+        flip_row = QWidget()
+        flip_l = QHBoxLayout(flip_row)
+        flip_l.setContentsMargins(0, 0, 0, 0)
+        flip_l.setSpacing(10)
+        flip_l.addWidget(self.in_flip_horizontal)
+        flip_l.addWidget(self.in_flip_vertical)
+        flip_l.addStretch(1)
+
+        settings_form.addRow("Min alt (°):"           self.in_min_alt)
         settings_form.addRow("Max alt (°):",           self.in_max_alt)
         settings_form.addRow("Finder FOV1 (arcmin):",  self.in_fov1)
         settings_form.addRow("Finder FOV2 (arcmin):",  self.in_fov2)
         settings_form.addRow("Finder roll:",           self.in_roll)
         settings_form.addRow("Finder source:",         self.in_survey)
+        settings_form.addRow("Flip finder:",            flip_row)
 
         left_l.addWidget(plan_box)
         left_l.addWidget(sky_box)
@@ -2336,6 +2360,7 @@ class MainWindow(QMainWindow):
             "Estimate exposure times and saturation-safe subexposures for all RHO filters."
         )
         self.btn_exposure.clicked.connect(self.open_exposure_calculator)
+        style_primary_button(self.btn_exposure)
         left_l.addWidget(self.btn_exposure)
         left_l.addStretch(1)
         return left
@@ -2379,6 +2404,7 @@ class MainWindow(QMainWindow):
         self.btn_plan = QPushButton("Plan Observations")
         self.btn_plan.setIcon(std_icon(self, "SP_MediaPlay"))
         self.btn_plan.clicked.connect(self.plan_observations)
+        style_primary_button(self.btn_plan)
 
         self.btn_remove = QPushButton("Remove Selected")
         self.btn_remove.setIcon(std_icon(self, "SP_TrashIcon"))
@@ -2630,6 +2656,8 @@ class MainWindow(QMainWindow):
         self.in_fov2.setValue(self._default_fov2)
         self.in_roll.setValue(self._default_roll)
         self.in_survey.setCurrentText(self._default_survey)
+        self.in_flip_horizontal.setChecked(self._default_flip_horizontal)
+        self.in_flip_vertical.setChecked(self._default_flip_vertical)
         self.apply_date_location(initial=False)
 
     def add_manual(self):
@@ -2802,6 +2830,8 @@ class MainWindow(QMainWindow):
         worker = FinderWorker(
             req_id, row.name, row.ra, row.dec,
             fov1, fov1, fov2, fov2, mode, roll_deg=roll,
+            flip_horizontal=self.in_flip_horizontal.isChecked(),
+            flip_vertical=self.in_flip_vertical.isChecked(),
         )
         self._finder_workers.add(worker)
         worker.finished.connect(self.on_finder_finished)
@@ -2861,7 +2891,9 @@ class MainWindow(QMainWindow):
                 continue
             try:
                 fig = core.render_finder_figure_from_data(
-                    coord, name, data, wcs, fov, lbl, roll_deg=roll)
+                    coord, name, data, wcs, fov, lbl, roll_deg=roll,
+                    flip_horizontal=self.in_flip_horizontal.isChecked(),
+                    flip_vertical=self.in_flip_vertical.isChecked())
                 if which == 1:
                     fig1 = fig
                 else:
