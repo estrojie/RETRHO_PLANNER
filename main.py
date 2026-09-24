@@ -111,6 +111,20 @@ def configure_interactive_widgets(root: QWidget):
         combo.setMinimumHeight(max(30, combo.minimumHeight()))
 
 
+def stop_worker_for_exit(worker: QThread, graceful_ms: int = 1800):
+    """Stop a worker during application/dialog shutdown without leaving QThreads alive."""
+    if worker is None or not worker.isRunning():
+        return
+    worker.requestInterruption()
+    if worker.wait(int(graceful_ms)):
+        return
+    # requests.get() cannot be cooperatively interrupted while blocked. At
+    # process/dialog shutdown only, terminate as a last resort to avoid
+    # QThread-destroyed-while-running crashes or long hangs.
+    worker.terminate()
+    worker.wait(1000)
+
+
 def copy_figure_to_clipboard(fig, parent=None, msg: str = "Plot copied to clipboard."):
     try:
         buf   = BytesIO()
@@ -1497,6 +1511,13 @@ class FinderInspectorDialog(QDialog):
         self.parent_window._open_finder_dialog_request = self
         self.parent_window.on_row_selected()
 
+    def closeEvent(self, event):
+        self._roll_timer.stop()
+        for worker in list(self._id_workers):
+            stop_worker_for_exit(worker)
+        self._id_workers.clear()
+        event.accept()
+
 class ExposureCalculatorDialog(QDialog):
     RHO_DEFAULTS = {
         "aperture_m": 0.356,
@@ -1624,11 +1645,12 @@ class ExposureCalculatorDialog(QDialog):
             "is detector ADU above bias; the S/N goal still determines how "
             "many frames are required."
         )
-        self.etc_peak_counts = self._dspin(100.0, 65535.0, 40000.0, 0, " ADU")
+        self.etc_peak_counts = self._dspin(100.0, 1.0e9, 40000.0, 0, " ADU")
         self.etc_peak_counts.setSingleStep(1000.0)
         self.etc_peak_counts.setToolTip(
             "Preferred peak-pixel counts per subexposure, above bias. "
-            "40,000 ADU is a conservative RHO starting point."
+            "40,000 ADU is a conservative RHO starting point; the configured "
+            "ADC maximum and full-well limit still cap each subexposure."
         )
         self.etc_use_peak_counts.toggled.connect(self._sync_peak_counts_control)
 
@@ -2435,9 +2457,15 @@ class ExposureCalculatorDialog(QDialog):
                     f" · second band: {self.etc_color_mag.value():.3f} {unit} "
                     f"in {color_band.display_name}"
                 )
+            obstruction_note = (
+                " · ⚠ central obstruction currently assumed 0%"
+                if cfg.central_obstruction_fraction <= 0.0
+                else ""
+            )
             self.etc_summary.setText(
                 f"{mode_desc} · {source_desc} in {band.display_name}"
                 f"{color_desc} · S/N target: {target.target_snr:g}{count_text}"
+                f"{obstruction_note}"
             )
             self._populate_results()
         except Exception as exc:
@@ -3387,10 +3415,8 @@ class MainWindow(QMainWindow):
             + list(self._plan_workers)
             + list(self._sky_workers)
         )
-        for w in workers:
-            if w.isRunning():
-                w.requestInterruption()
-                w.wait(2000)
+        for worker in workers:
+            stop_worker_for_exit(worker)
         event.accept()
 
     def _set_altitude_fig(self, fig):
