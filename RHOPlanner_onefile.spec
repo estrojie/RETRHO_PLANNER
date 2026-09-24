@@ -15,7 +15,7 @@ RUNTIME_HOOKS = [str(ROOT / "build_support" / "rthook_network.py")]
 if sys.platform.startswith("linux"):
     RUNTIME_HOOKS.append(str(ROOT / "build_support" / "rthook_linux_qt_compat.py"))
 ICON = icon_for_platform(ROOT, sys.platform)
-STRIP_BINARIES = sys.platform.startswith("linux")
+STRIP_BINARIES = False
 
 analysis = Analysis(
     [str(ROOT / "main.py")],
