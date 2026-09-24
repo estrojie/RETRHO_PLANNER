@@ -30,7 +30,7 @@ def _macos_bundle_version(value: str) -> str:
 
 MACOS_BUNDLE_VERSION = _macos_bundle_version(APP_VERSION)
 ICON = icon_for_platform(ROOT, sys.platform)
-STRIP_BINARIES = sys.platform.startswith("linux")
+STRIP_BINARIES = False
 DATAS, BINARIES, HIDDENIMPORTS = build_collection()
 
 RUNTIME_HOOKS = [str(ROOT / "build_support" / "rthook_network.py")]
