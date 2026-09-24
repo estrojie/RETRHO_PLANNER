@@ -1249,7 +1249,7 @@ def identify_star_at_coord(
         pass
 
     try:
-        simbad_tap = Simbad()
+        simbad_tap = _get_simbad()
         ra_deg = float(click.ra.deg)
         dec_deg = float(click.dec.deg)
         rad_deg = radius_arcsec / 3600.0
@@ -1280,7 +1280,7 @@ def identify_star_at_coord(
                     candidates.append(cand)
     except Exception:
         try:
-            simbad_tap = Simbad()
+            simbad_tap = _get_simbad()
             ra_deg = float(click.ra.deg)
             dec_deg = float(click.dec.deg)
             rad_deg = radius_arcsec / 3600.0
