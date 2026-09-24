@@ -158,20 +158,6 @@ def apply_app_style(app: QApplication):
         padding:5px 7px; min-height:22px; color:#e5e5e5;
         selection-background-color:#2b6cb0;
     }
-    QSpinBox, QDoubleSpinBox { padding-right:25px; }
-    QSpinBox::up-button, QDoubleSpinBox::up-button {
-        subcontrol-origin:border; subcontrol-position:top right;
-        width:22px; border-left:1px solid #3a3d45; border-bottom:1px solid #3a3d45;
-        background:#30343d;
-    }
-    QSpinBox::down-button, QDoubleSpinBox::down-button {
-        subcontrol-origin:border; subcontrol-position:bottom right;
-        width:22px; border-left:1px solid #3a3d45; background:#30343d;
-    }
-    QSpinBox::up-button:hover, QSpinBox::down-button:hover,
-    QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
-        background:#3b5576;
-    }
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus,
     QDateEdit:focus, QComboBox:focus { border:1px solid #4a90e2; }
     QPushButton {
@@ -192,7 +178,7 @@ def apply_app_style(app: QApplication):
         background-color:#262b34; border:1px solid #41506a; padding:7px 12px;
     }
     QPushButton[toolbarButton="true"]:hover {
-        background-color:#2e3f57; border:1px solid #5a8fd8;
+        background-color:#315d8a; border:1px solid #79b8ff; color:#ffffff;
     }
     QPushButton[toolbarButton="true"]:pressed {
         background-color:#1f5fa6; border:1px solid #79aef0;
@@ -317,7 +303,10 @@ class PlanWorker(QThread):
 
 
 class FinderWorker(QThread):
-    finished = Signal(int, object, object, object, object, object, object, object, str, str)
+    finished = Signal(
+        int, object, object, object, object, object, object, object, str, str,
+        int, int, int, int,
+    )
     failed   = Signal(int, str)
 
     def __init__(
@@ -375,6 +364,8 @@ class FinderWorker(QThread):
                 self.request_id, fig1, fig2,
                 data1, wcs1, data2, wcs2,
                 rt.coord, lbl1, lbl2,
+                int(self.fov1_w), int(self.fov1_h),
+                int(self.fov2_w), int(self.fov2_h),
             )
         except Exception as e:
             self.failed.emit(self.request_id, str(e))
@@ -397,14 +388,23 @@ class StarIdWorker(QThread):
             self.failed.emit(str(e))
 
 class SkyConditionsWorker(QThread):
-    finished = Signal(object)
-    failed   = Signal(str)
+    finished = Signal(int, object)
+    failed   = Signal(int, str)
+
+    def __init__(self, request_id: int, site, planning_date):
+        super().__init__()
+        self.request_id = int(request_id)
+        self.site = site
+        self.planning_date = planning_date
 
     def run(self):
         try:
-            self.finished.emit(core.sky_conditions())
+            self.finished.emit(
+                self.request_id,
+                core.sky_conditions(site=self.site, planning_date=self.planning_date),
+            )
         except Exception as e:
-            self.failed.emit(str(e))
+            self.failed.emit(self.request_id, str(e))
 
 class AltitudeInspectorDialog(QDialog):
     def __init__(self, parent, coords, names, min_alt, max_alt):
@@ -447,24 +447,6 @@ class AltitudeInspectorDialog(QDialog):
 
         btn_none = QPushButton("Unselect All")
         btn_none.clicked.connect(self._unselect_all)
-
-        self.btn_flip_h = QPushButton("Flip H")
-        self.btn_flip_h.setCheckable(True)
-        self.btn_flip_h.setChecked(
-            bool(getattr(parent, "in_flip_horizontal", None)
-                 and parent.in_flip_horizontal.isChecked())
-        )
-        style_toolbar_button(self.btn_flip_h)
-        self.btn_flip_h.toggled.connect(lambda _on: self._apply_roll_from_cache())
-
-        self.btn_flip_v = QPushButton("Flip V")
-        self.btn_flip_v.setCheckable(True)
-        self.btn_flip_v.setChecked(
-            bool(getattr(parent, "in_flip_vertical", None)
-                 and parent.in_flip_vertical.isChecked())
-        )
-        style_toolbar_button(self.btn_flip_v)
-        self.btn_flip_v.toggled.connect(lambda _on: self._apply_roll_from_cache())
 
         self.btn_copy_plot = QPushButton("Copy Plot")
         style_toolbar_button(self.btn_copy_plot)
@@ -1522,6 +1504,7 @@ class ExposureCalculatorDialog(QDialog):
         "physical_pixel_scale_arcsec": 0.54,
         "read_noise_e": 9.3,
         "gain_e_per_adu": 0.37,
+        "adc_max_adu": 65535.0,
         "dark_current_e_s_physical_pix": 0.15,
         "full_well_e": 25500.0,
         "well_fraction_pct": 80.0,
@@ -1540,6 +1523,7 @@ class ExposureCalculatorDialog(QDialog):
         super().__init__(parent)
         self.parent_window = parent
         self._results = []
+        self._updating_target_fields = False
         self.setWindowTitle("RHO Exposure Time Calculator")
         self._size_for_available_screen(parent)
 
@@ -1562,10 +1546,16 @@ class ExposureCalculatorDialog(QDialog):
         target_grid.setVerticalSpacing(7)
 
         self.etc_target_name = QLineEdit(target_name or "")
+        self.etc_target_name.setPlaceholderText("Any planned or unplanned object")
+        self.etc_target_name.textEdited.connect(self._mark_manual_target)
         self.etc_ref_mag = self._dspin(-10.0, 40.0, 12.0, 3, " mag")
+        self.etc_ref_mag.valueChanged.connect(lambda _value: self._mark_manual_target())
         self.etc_ref_band = QComboBox()
         self._populate_reference_bands()
         self._set_reference_band("Johnson V")
+        self.etc_ref_band.currentIndexChanged.connect(
+            lambda _index: self._mark_manual_target()
+        )
 
         self.etc_use_color = QCheckBox("Use optional color")
         self.etc_color_mag = self._dspin(-10.0, 40.0, 12.0, 3, " mag")
@@ -1576,9 +1566,8 @@ class ExposureCalculatorDialog(QDialog):
         self.etc_color_band.setEnabled(False)
         self.etc_use_color.toggled.connect(self._sync_optional_color_controls)
         self.etc_ref_band.setToolTip(
-            "Johnson/Cousins and Gaia DR3 catalogue magnitudes are interpreted "
-            "in their Vega systems. Sloan and listed narrowband magnitudes are "
-            "interpreted as AB magnitudes."
+            "Johnson/Cousins, Gaia DR3, and 2MASS inputs use their Vega zero points. "
+            "Sloan/SDSS, Pan-STARRS, and listed narrowband inputs use AB zero points."
         )
 
         self.etc_source_geometry = QComboBox()
@@ -1588,12 +1577,25 @@ class ExposureCalculatorDialog(QDialog):
             self._sync_source_geometry_controls
         )
 
+        self.etc_extended_input = QComboBox()
+        self.etc_extended_input.addItem("Mean surface brightness + area", "surface")
+        self.etc_extended_input.addItem("Integrated magnitude + angular size", "integrated")
+        self.etc_extended_input.currentIndexChanged.connect(
+            self._sync_source_geometry_controls
+        )
+
         self.etc_surface_area = self._dspin(0.1, 1.0e9, 100.0, 1, " arcsec²")
         self.etc_surface_area.setToolTip(
             "Measurement aperture area for an extended/diffuse source. "
             "The magnitude above is interpreted as surface brightness in mag/arcsec²."
         )
         self.etc_surface_area.setEnabled(False)
+        self.etc_major_axis = self._dspin(0.1, 1.0e6, 20.0, 1, " arcsec")
+        self.etc_minor_axis = self._dspin(0.1, 1.0e6, 10.0, 1, " arcsec")
+        self.etc_major_axis.setToolTip("Full major-axis diameter of the measurement region.")
+        self.etc_minor_axis.setToolTip("Full minor-axis diameter of the measurement region.")
+        self.etc_major_axis.setEnabled(False)
+        self.etc_minor_axis.setEnabled(False)
 
         self.etc_use_peak_surface = QCheckBox("Use peak surface brightness")
         self.etc_peak_surface_mag = self._dspin(-10.0, 40.0, 18.0, 3, " mag/arcsec²")
@@ -1643,15 +1645,14 @@ class ExposureCalculatorDialog(QDialog):
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
         self.etc_target_selector.setToolTip(
-            "Choose any target currently listed in the observing planner. "
-            "The target name and available catalogue V magnitude are copied "
-            "into the calculator automatically."
+            "Optional shortcut: choose a planned target, or leave this on "
+            "Manual / unplanned target and enter any object below."
         )
         self.etc_target_selector.currentIndexChanged.connect(
             self._on_planner_target_changed
         )
 
-        target_grid.addWidget(QLabel("Planner target:"), 0, 0)
+        target_grid.addWidget(QLabel("Planner target (optional):"), 0, 0)
         target_grid.addWidget(self.etc_target_selector, 0, 1, 1, 5)
         target_grid.addWidget(QLabel("Target name:"), 1, 0)
         target_grid.addWidget(self.etc_target_name, 1, 1, 1, 5)
@@ -1664,8 +1665,22 @@ class ExposureCalculatorDialog(QDialog):
 
         target_grid.addWidget(QLabel("Source geometry:"), 3, 0)
         target_grid.addWidget(self.etc_source_geometry, 3, 1, 1, 2)
-        target_grid.addWidget(QLabel("Area:"), 3, 3)
-        target_grid.addWidget(self.etc_surface_area, 3, 4, 1, 2)
+        target_grid.addWidget(QLabel("Extended input:"), 3, 3)
+        target_grid.addWidget(self.etc_extended_input, 3, 4, 1, 2)
+
+        area_row = QWidget()
+        area_l = QHBoxLayout(area_row)
+        area_l.setContentsMargins(0, 0, 0, 0)
+        area_l.setSpacing(8)
+        area_l.addWidget(QLabel("Area"))
+        area_l.addWidget(self.etc_surface_area)
+        area_l.addSpacing(8)
+        area_l.addWidget(QLabel("Major"))
+        area_l.addWidget(self.etc_major_axis)
+        area_l.addWidget(QLabel("Minor"))
+        area_l.addWidget(self.etc_minor_axis)
+        target_grid.addWidget(QLabel("Extended aperture:"), 4, 0)
+        target_grid.addWidget(area_row, 4, 1, 1, 5)
 
         peak_sb_row = QWidget()
         peak_sb_l = QHBoxLayout(peak_sb_row)
@@ -1674,8 +1689,8 @@ class ExposureCalculatorDialog(QDialog):
         peak_sb_l.addWidget(self.etc_use_peak_surface)
         peak_sb_l.addWidget(self.etc_peak_surface_mag)
         peak_sb_l.addStretch(1)
-        target_grid.addWidget(QLabel("Brightest region:"), 4, 0)
-        target_grid.addWidget(peak_sb_row, 4, 1, 1, 5)
+        target_grid.addWidget(QLabel("Brightest region:"), 5, 0)
+        target_grid.addWidget(peak_sb_row, 5, 1, 1, 5)
 
         color_row = QWidget()
         color_l = QHBoxLayout(color_row)
@@ -1684,13 +1699,13 @@ class ExposureCalculatorDialog(QDialog):
         color_l.addWidget(self.etc_use_color)
         color_l.addWidget(self.etc_color_mag)
         color_l.addWidget(self.etc_color_band, 1)
-        target_grid.addWidget(QLabel("Color constraint:"), 5, 0)
-        target_grid.addWidget(color_row, 5, 1, 1, 5)
+        target_grid.addWidget(QLabel("Color constraint:"), 6, 0)
+        target_grid.addWidget(color_row, 6, 1, 1, 5)
 
-        target_grid.addWidget(QLabel("Desired S/N:"), 6, 0)
-        target_grid.addWidget(self.etc_snr, 6, 1)
-        target_grid.addWidget(QLabel("Peak-count target:"), 6, 2)
-        target_grid.addWidget(peak_counts_widget, 6, 3, 1, 3)
+        target_grid.addWidget(QLabel("Desired S/N:"), 7, 0)
+        target_grid.addWidget(self.etc_snr, 7, 1)
+        target_grid.addWidget(QLabel("Peak-count target:"), 7, 2)
+        target_grid.addWidget(peak_counts_widget, 7, 3, 1, 3)
         target_grid.setColumnStretch(1, 1)
         target_grid.setColumnStretch(3, 2)
         target_grid.setColumnStretch(5, 1)
@@ -1809,15 +1824,15 @@ class ExposureCalculatorDialog(QDialog):
         form.setVerticalSpacing(8)
 
         self.etc_source_type = QComboBox()
-        self.etc_source_type.addItem("Star / continuum object", "star")
-        self.etc_source_type.addItem("Emission nebula", "nebula")
+        self.etc_source_type.addItem("Stellar / blackbody-like continuum", "star")
+        self.etc_source_type.addItem("Flat continuum / galaxy / nebula", "nebula")
 
         self.etc_conditions = QComboBox()
         for key, (label, _fwhm, _airmass) in self.CONDITION_PRESETS.items():
             self.etc_conditions.addItem(label, key)
         self.etc_conditions.setCurrentIndex(1)
 
-        form.addRow("Source type:", self.etc_source_type)
+        form.addRow("Spectrum / object type:", self.etc_source_type)
         form.addRow("Conditions:", self.etc_conditions)
 
         note = QLabel(
@@ -1858,6 +1873,7 @@ class ExposureCalculatorDialog(QDialog):
             0.01, 10.0, d["physical_pixel_scale_arcsec"], 3, " arcsec/physical pix")
         self.etc_read_noise = self._dspin(0.0, 100.0, d["read_noise_e"], 2, " e-/read")
         self.etc_gain = self._dspin(0.001, 100.0, d["gain_e_per_adu"], 3, " e-/ADU")
+        self.etc_adc_max = self._dspin(255.0, 1.0e9, d["adc_max_adu"], 0, " ADU")
         self.etc_dark = self._dspin(
             0.0, 100.0, d["dark_current_e_s_physical_pix"], 4, " e-/s/physical pix")
         self.etc_full_well = self._dspin(1000.0, 1.0e7, d["full_well_e"], 0, " e-")
@@ -1866,11 +1882,16 @@ class ExposureCalculatorDialog(QDialog):
 
         inst_form.addRow("Profile:", self.etc_profile)
         inst_form.addRow("Clear aperture:", self.etc_aperture)
+        self.etc_obstruction.setToolTip(
+            "Diameter obstruction as a percent of clear aperture. The RHO preset "
+            "remains 0% until the installed 14-inch telescope is measured or verified."
+        )
         inst_form.addRow("Central obstruction (diameter):", self.etc_obstruction)
         inst_form.addRow("Base system efficiency:", self.etc_throughput)
         inst_form.addRow("1x1 plate scale:", self.etc_physical_pixel_scale)
         inst_form.addRow("Read noise:", self.etc_read_noise)
         inst_form.addRow("Camera gain:", self.etc_gain)
+        inst_form.addRow("ADC maximum:", self.etc_adc_max)
         inst_form.addRow("Dark current:", self.etc_dark)
         inst_form.addRow("Full well:", self.etc_full_well)
         inst_form.addRow("Use well up to:", self.etc_well_fraction)
@@ -1909,9 +1930,21 @@ class ExposureCalculatorDialog(QDialog):
         source_form.addRow("Continuum model:", self.etc_spectrum)
         source_form.addRow("Effective temperature:", self.etc_temperature)
 
+        self.etc_line_flux_mode = QComboBox()
+        self.etc_line_flux_mode.addItem("Integrated aperture flux", "integrated")
+        self.etc_line_flux_mode.addItem("Surface flux per arcsec²", "surface")
+        source_form.addRow("Emission-line input:", self.etc_line_flux_mode)
+
+        self.etc_peak_line_factor = self._dspin(1.0, 1.0e4, 1.0, 2, " x mean")
+        self.etc_peak_line_factor.setToolTip(
+            "For extended sources, optional concentration of the brightest line-emitting "
+            "knot relative to the mean line surface brightness."
+        )
+        source_form.addRow("Peak line concentration:", self.etc_peak_line_factor)
+
         line_note = QLabel(
-            "Optional integrated line flux in the measurement aperture, in "
-            "10^-14 erg s^-1 cm^-2. Leave zero for a continuum-only estimate."
+            "Optional H-alpha/H-beta/[O III]/[S II] fluxes in units of "
+            "10^-14 erg s^-1 cm^-2. In surface mode the same unit is per arcsec²."
         )
         line_note.setWordWrap(True)
         source_form.addRow(line_note)
@@ -2003,22 +2036,28 @@ class ExposureCalculatorDialog(QDialog):
 
     def _sync_source_geometry_controls(self):
         extended = self.etc_source_geometry.currentData() == "extended"
-        self.etc_surface_area.setEnabled(extended)
+        input_mode = str(self.etc_extended_input.currentData() or "surface")
+        surface_mode = extended and input_mode == "surface"
+        integrated_mode = extended and input_mode == "integrated"
+
+        self.etc_extended_input.setEnabled(extended)
+        self.etc_surface_area.setEnabled(surface_mode)
+        self.etc_major_axis.setEnabled(integrated_mode)
+        self.etc_minor_axis.setEnabled(integrated_mode)
         self.etc_use_peak_surface.setEnabled(extended)
         self.etc_peak_surface_mag.setEnabled(
             extended and self.etc_use_peak_surface.isChecked()
         )
-        if extended:
+        if surface_mode:
             self.etc_ref_mag.setSuffix(" mag/arcsec²")
-            self.etc_ref_mag.setToolTip(
-                "Mean surface brightness in the selected input band."
-            )
+            self.etc_ref_mag.setToolTip("Mean surface brightness in the selected input band.")
+            self.etc_color_mag.setSuffix(" mag/arcsec²")
         else:
-            self.etc_use_peak_surface.setChecked(False)
             self.etc_ref_mag.setSuffix(" mag")
-            self.etc_ref_mag.setToolTip(
-                "Integrated/catalog magnitude in the selected input band."
-            )
+            self.etc_ref_mag.setToolTip("Integrated/catalog magnitude in the selected input band.")
+            self.etc_color_mag.setSuffix(" mag")
+        if not extended:
+            self.etc_use_peak_surface.setChecked(False)
 
     def _sync_profile_controls(self):
         if not hasattr(self, "etc_profile"):
@@ -2027,14 +2066,14 @@ class ExposureCalculatorDialog(QDialog):
         fields = (
             self.etc_aperture, self.etc_obstruction, self.etc_throughput,
             self.etc_physical_pixel_scale, self.etc_read_noise, self.etc_gain,
-            self.etc_dark, self.etc_full_well, self.etc_well_fraction,
+            self.etc_adc_max, self.etc_dark, self.etc_full_well, self.etc_well_fraction,
         )
         if not is_custom:
             d = self.RHO_DEFAULTS
             values = (
                 d["aperture_m"], d["obstruction_pct"], d["throughput_pct"],
                 d["physical_pixel_scale_arcsec"], d["read_noise_e"],
-                d["gain_e_per_adu"], d["dark_current_e_s_physical_pix"],
+                d["gain_e_per_adu"], d["adc_max_adu"], d["dark_current_e_s_physical_pix"],
                 d["full_well_e"], d["well_fraction_pct"],
             )
             for field, value in zip(fields, values):
