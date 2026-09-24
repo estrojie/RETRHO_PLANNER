@@ -2492,10 +2492,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
         self.plan:            List[PlanRow] = []
-        self._finder_workers: set           = set()
-        self._plan_workers:   set           = set()
-        self._sky_worker: SkyConditionsWorker | None = None
-        self._finder_request_id             = 0
+        self._finder_workers: set = set()
+        self._plan_workers: set = set()
+        self._sky_workers: set = set()
+        self._sky_request_id = 0
+        self._finder_request_id = 0
 
         self._last_coords: list = []
         self._last_names:  list = []
@@ -2508,6 +2509,11 @@ class MainWindow(QMainWindow):
         self._roll_debounce.setSingleShot(True)
         self._roll_debounce.setInterval(400)
         self._roll_debounce.timeout.connect(self._apply_roll_from_cache)
+
+        self._finder_fov_debounce = QTimer(self)
+        self._finder_fov_debounce.setSingleShot(True)
+        self._finder_fov_debounce.setInterval(500)
+        self._finder_fov_debounce.timeout.connect(self.refresh_finders_for_selected)
 
         root   = QWidget()
         self.setCentralWidget(root)
@@ -2636,6 +2642,10 @@ class MainWindow(QMainWindow):
 
         fov1_pair = _fov_pair(self.in_fov1, self.in_fov1_h)
         fov2_pair = _fov_pair(self.in_fov2, self.in_fov2_h)
+        for spin in (self.in_fov1, self.in_fov1_h, self.in_fov2, self.in_fov2_h):
+            spin.valueChanged.connect(
+                lambda _value: self._finder_fov_debounce.start()
+            )
 
         self.in_roll = QDoubleSpinBox()
         self.in_roll.setRange(-360.0, 360.0)
@@ -2670,6 +2680,11 @@ class MainWindow(QMainWindow):
         settings_form.addRow("Finder roll:",           self.in_roll)
         settings_form.addRow("Finder source:",         self.in_survey)
         settings_form.addRow("Flip finder:",            flip_row)
+        self.btn_update_finders = QPushButton("Update Finder Charts")
+        self.btn_update_finders.setIcon(std_icon(self, "SP_BrowserReload"))
+        self.btn_update_finders.clicked.connect(self.refresh_finders_for_selected)
+        style_toolbar_button(self.btn_update_finders)
+        settings_form.addRow(self.btn_update_finders)
 
         left_l.addWidget(plan_box)
         left_l.addWidget(sky_box)
@@ -2763,16 +2778,29 @@ class MainWindow(QMainWindow):
         self._right_split.setChildrenCollapsible(False)
 
         card_css = """
-        QWidget {
-            border:1px solid #3a3d45; border-radius:10px;
+        QWidget#plotCard {
+            border:1px solid #343a46;
+            border-radius:10px;
             background-color:rgba(21,23,28,0.45);
-        }"""
+        }
+        QLabel#plotCardTitle {
+            border:none;
+            background:transparent;
+            color:#eef2f7;
+            font-weight:600;
+            padding:1px 2px 3px 2px;
+        }
+        """
 
         alt_container = QWidget()
+        alt_container.setObjectName("plotCard")
         alt_container.setStyleSheet(card_css)
         alt_l = QVBoxLayout(alt_container)
         alt_l.setContentsMargins(10, 10, 10, 10); alt_l.setSpacing(8)
-        alt_l.addWidget(QLabel("Altitude Plot (selected date & location)"))
+        alt_title = QLabel("Altitude Plot")
+        alt_title.setObjectName("plotCardTitle")
+        alt_title.setToolTip("Selected observing date and location")
+        alt_l.addWidget(alt_title)
 
         alt_btn_row   = QWidget()
         alt_btn_row_l = QHBoxLayout(alt_btn_row)
@@ -2780,6 +2808,7 @@ class MainWindow(QMainWindow):
 
         self.btn_open_alt = QPushButton("Open Altitude Inspector")
         style_toolbar_button(self.btn_open_alt)
+        style_primary_button(self.btn_open_alt)
         self.btn_open_alt.clicked.connect(self.open_altitude_inspector)
 
         self.btn_copy_alt = QPushButton("Copy Altitude Plot")
@@ -2797,10 +2826,14 @@ class MainWindow(QMainWindow):
         self._right_split.addWidget(alt_container)
 
         finder_container = QWidget()
+        finder_container.setObjectName("plotCard")
         finder_container.setStyleSheet(card_css)
         finder_l = QVBoxLayout(finder_container)
         finder_l.setContentsMargins(10, 10, 10, 10); finder_l.setSpacing(8)
-        finder_l.addWidget(QLabel("Finder Charts (selected target)"))
+        finder_title = QLabel("Finder Charts")
+        finder_title.setObjectName("plotCardTitle")
+        finder_title.setToolTip("Finder charts for the selected target")
+        finder_l.addWidget(finder_title)
 
         finder_btn_row   = QWidget()
         finder_btn_row_l = QHBoxLayout(finder_btn_row)
@@ -2808,6 +2841,7 @@ class MainWindow(QMainWindow):
 
         self.btn_open_fov1 = QPushButton("Open FOV1 Inspector")
         style_toolbar_button(self.btn_open_fov1)
+        style_primary_button(self.btn_open_fov1)
         self.btn_open_fov1.clicked.connect(lambda: self.open_finder_inspector(1))
 
         self.btn_copy_fov1 = QPushButton("Copy FOV1")
@@ -2817,6 +2851,7 @@ class MainWindow(QMainWindow):
 
         self.btn_open_fov2 = QPushButton("Open FOV2 Inspector")
         style_toolbar_button(self.btn_open_fov2)
+        style_primary_button(self.btn_open_fov2)
         self.btn_open_fov2.clicked.connect(lambda: self.open_finder_inspector(2))
 
         self.btn_copy_fov2 = QPushButton("Copy FOV2")
@@ -2879,8 +2914,7 @@ class MainWindow(QMainWindow):
         mag = row.vmag if row is not None else None
 
         if self._exposure_dialog is not None and self._exposure_dialog.isVisible():
-            self._exposure_dialog.refresh_planner_targets(preferred_row=row)
-            self._exposure_dialog.set_target(name, mag, planner_row=row)
+            self._exposure_dialog.refresh_planner_targets()
             self._exposure_dialog.raise_()
             self._exposure_dialog.activateWindow()
             return
@@ -2899,19 +2933,22 @@ class MainWindow(QMainWindow):
             dlg.refresh_planner_targets(preferred_row=preferred_row)
 
     def refresh_sky(self):
-        # Weather/network requests used to run synchronously on the GUI thread,
-        # which could make startup and location changes look frozen.  Keep one
-        # background request at a time and update the labels when it completes.
-        if self._sky_worker is not None and self._sky_worker.isRunning():
-            return
+        # Each request captures the site/date that created it. Older responses
+        # are discarded if the user changes settings while a request is running.
+        self._sky_request_id += 1
+        request_id = self._sky_request_id
+        site = core.get_site_config()
+        planning_date = core.get_planning_date()
 
         self.statusBar().showMessage("Refreshing sky conditions…")
-        worker = SkyConditionsWorker(self)
-        self._sky_worker = worker
+        worker = SkyConditionsWorker(request_id, site, planning_date)
+        self._sky_workers.add(worker)
 
-        def _finished(cond):
-            if self._sky_worker is worker:
-                self._sky_worker = None
+        def _finished(result_id, cond):
+            self._sky_workers.discard(worker)
+            if result_id != self._sky_request_id:
+                worker.deleteLater()
+                return
 
             sunset = cond.get("sunset_local")
             self.lbl_sunset.setText(
@@ -2940,10 +2977,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Ready")
             worker.deleteLater()
 
-        def _failed(message):
-            if self._sky_worker is worker:
-                self._sky_worker = None
-            self.statusBar().showMessage(f"Sky conditions unavailable: {message}", 5000)
+        def _failed(result_id, message):
+            self._sky_workers.discard(worker)
+            if result_id == self._sky_request_id:
+                self.statusBar().showMessage(
+                    f"Sky conditions unavailable: {message}", 5000
+                )
             worker.deleteLater()
 
         worker.finished.connect(_finished)
@@ -3188,17 +3227,16 @@ class MainWindow(QMainWindow):
         request_id, fig1, fig2,
         data1, wcs1, data2, wcs2,
         coord, lbl1, lbl2,
+        fov1_w, fov1_h, fov2_w, fov2_h,
     ):
         if request_id != self._finder_request_id:
             return
 
         self._raw_finder[1] = (
-            data1, wcs1, coord, lbl1,
-            int(self.in_fov1.value()), int(self.in_fov1_h.value())
+            data1, wcs1, coord, lbl1, int(fov1_w), int(fov1_h)
         )
         self._raw_finder[2] = (
-            data2, wcs2, coord, lbl2,
-            int(self.in_fov2.value()), int(self.in_fov2_h.value())
+            data2, wcs2, coord, lbl2, int(fov2_w), int(fov2_h)
         )
 
         self._set_finder_figs(fig1, fig2)
@@ -3239,8 +3277,10 @@ class MainWindow(QMainWindow):
                     fig2 = fig
             except Exception:
                 pass
-        if fig1 is not None and fig2 is not None:
-            self._set_finder_figs(fig1, fig2)
+        if fig1 is not None:
+            self._set_single_finder_fig(1, fig1)
+        if fig2 is not None:
+            self._set_single_finder_fig(2, fig2)
 
     def open_altitude_inspector(self):
         if not self._last_coords:
@@ -3315,9 +3355,11 @@ class MainWindow(QMainWindow):
                                           lambda e: self.open_finder_inspector(2))
 
     def closeEvent(self, event):
-        workers = list(self._finder_workers) + list(self._plan_workers)
-        if self._sky_worker is not None:
-            workers.append(self._sky_worker)
+        workers = (
+            list(self._finder_workers)
+            + list(self._plan_workers)
+            + list(self._sky_workers)
+        )
         for w in workers:
             if w.isRunning():
                 w.requestInterruption()
@@ -3334,6 +3376,32 @@ class MainWindow(QMainWindow):
         self.alt_canvas = FigureCanvas(fig)
         layout.addWidget(self.alt_canvas, 1)
         self._bind_altitude_click()
+
+    def _set_single_finder_fig(self, which_fov: int, fig):
+        if which_fov == 1:
+            old_canvas = self.finder_canvas_1
+            tab_label = "FOV1"
+        else:
+            old_canvas = self.finder_canvas_2
+            tab_label = "FOV2"
+
+        index = self.finder_tabs.indexOf(old_canvas)
+        if index < 0:
+            index = 0 if which_fov == 1 else min(1, self.finder_tabs.count())
+        try:
+            core.plt.close(old_canvas.figure)
+        except Exception:
+            pass
+        self.finder_tabs.removeTab(index)
+        old_canvas.setParent(None)
+
+        new_canvas = FigureCanvas(fig)
+        self.finder_tabs.insertTab(index, new_canvas, tab_label)
+        if which_fov == 1:
+            self.finder_canvas_1 = new_canvas
+        else:
+            self.finder_canvas_2 = new_canvas
+        self._bind_finder_clicks()
 
     def _set_finder_figs(self, fig1, fig2):
         try: core.plt.close(self.finder_canvas_1.figure)
