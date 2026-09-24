@@ -1678,7 +1678,7 @@ class ExposureCalculatorDialog(QDialog):
         peak_counts_layout.addStretch(1)
 
         self.etc_target_selector = QComboBox()
-        self.etc_target_selector.setMinimumContentsLength(28)
+        self.etc_target_selector.setMinimumContentsLength(18)
         self.etc_target_selector.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
@@ -1691,20 +1691,22 @@ class ExposureCalculatorDialog(QDialog):
         )
 
         target_grid.addWidget(QLabel("Planner target (optional):"), 0, 0)
-        target_grid.addWidget(self.etc_target_selector, 0, 1, 1, 5)
+        target_grid.addWidget(self.etc_target_selector, 0, 1, 1, 3)
         target_grid.addWidget(QLabel("Target name:"), 1, 0)
-        target_grid.addWidget(self.etc_target_name, 1, 1, 1, 5)
+        target_grid.addWidget(self.etc_target_name, 1, 1, 1, 3)
+
         target_grid.addWidget(QLabel("Magnitude:"), 2, 0)
         target_grid.addWidget(self.etc_ref_mag, 2, 1)
         target_grid.addWidget(QLabel("Input band:"), 2, 2)
         target_grid.addWidget(self.etc_ref_band, 2, 3)
-        target_grid.addWidget(QLabel("Binning:"), 2, 4)
-        target_grid.addWidget(self.etc_binning, 2, 5)
 
-        target_grid.addWidget(QLabel("Source geometry:"), 3, 0)
-        target_grid.addWidget(self.etc_source_geometry, 3, 1, 1, 2)
-        target_grid.addWidget(QLabel("Extended input:"), 3, 3)
-        target_grid.addWidget(self.etc_extended_input, 3, 4, 1, 2)
+        target_grid.addWidget(QLabel("Binning:"), 3, 0)
+        target_grid.addWidget(self.etc_binning, 3, 1)
+        target_grid.addWidget(QLabel("Source geometry:"), 3, 2)
+        target_grid.addWidget(self.etc_source_geometry, 3, 3)
+
+        target_grid.addWidget(QLabel("Extended input:"), 4, 0)
+        target_grid.addWidget(self.etc_extended_input, 4, 1, 1, 3)
 
         area_row = QWidget()
         area_l = QHBoxLayout(area_row)
@@ -1717,8 +1719,8 @@ class ExposureCalculatorDialog(QDialog):
         area_l.addWidget(self.etc_major_axis)
         area_l.addWidget(QLabel("Minor"))
         area_l.addWidget(self.etc_minor_axis)
-        target_grid.addWidget(QLabel("Extended aperture:"), 4, 0)
-        target_grid.addWidget(area_row, 4, 1, 1, 5)
+        target_grid.addWidget(QLabel("Extended aperture:"), 5, 0)
+        target_grid.addWidget(area_row, 5, 1, 1, 3)
 
         peak_sb_row = QWidget()
         peak_sb_l = QHBoxLayout(peak_sb_row)
@@ -1727,8 +1729,8 @@ class ExposureCalculatorDialog(QDialog):
         peak_sb_l.addWidget(self.etc_use_peak_surface)
         peak_sb_l.addWidget(self.etc_peak_surface_mag)
         peak_sb_l.addStretch(1)
-        target_grid.addWidget(QLabel("Brightest region:"), 5, 0)
-        target_grid.addWidget(peak_sb_row, 5, 1, 1, 5)
+        target_grid.addWidget(QLabel("Brightest region:"), 6, 0)
+        target_grid.addWidget(peak_sb_row, 6, 1, 1, 3)
 
         color_row = QWidget()
         color_l = QHBoxLayout(color_row)
@@ -1737,16 +1739,15 @@ class ExposureCalculatorDialog(QDialog):
         color_l.addWidget(self.etc_use_color)
         color_l.addWidget(self.etc_color_mag)
         color_l.addWidget(self.etc_color_band, 1)
-        target_grid.addWidget(QLabel("Color constraint:"), 6, 0)
-        target_grid.addWidget(color_row, 6, 1, 1, 5)
+        target_grid.addWidget(QLabel("Color constraint:"), 7, 0)
+        target_grid.addWidget(color_row, 7, 1, 1, 3)
 
-        target_grid.addWidget(QLabel("Desired S/N:"), 7, 0)
-        target_grid.addWidget(self.etc_snr, 7, 1)
-        target_grid.addWidget(QLabel("Peak-count target:"), 7, 2)
-        target_grid.addWidget(peak_counts_widget, 7, 3, 1, 3)
+        target_grid.addWidget(QLabel("Desired S/N:"), 8, 0)
+        target_grid.addWidget(self.etc_snr, 8, 1)
+        target_grid.addWidget(QLabel("Peak-count target:"), 8, 2)
+        target_grid.addWidget(peak_counts_widget, 8, 3)
         target_grid.setColumnStretch(1, 1)
         target_grid.setColumnStretch(3, 2)
-        target_grid.setColumnStretch(5, 1)
         root.addWidget(target_box)
 
         self.etc_splitter = QSplitter(Qt.Vertical)
@@ -2951,8 +2952,10 @@ class MainWindow(QMainWindow):
         finder_l.addWidget(finder_title)
 
         finder_btn_row   = QWidget()
-        finder_btn_row_l = QHBoxLayout(finder_btn_row)
-        finder_btn_row_l.setContentsMargins(0, 0, 0, 0); finder_btn_row_l.setSpacing(8)
+        finder_btn_row_l = QGridLayout(finder_btn_row)
+        finder_btn_row_l.setContentsMargins(0, 0, 0, 0)
+        finder_btn_row_l.setHorizontalSpacing(8)
+        finder_btn_row_l.setVerticalSpacing(6)
 
         self.btn_open_fov1 = QPushButton("Open FOV1 Inspector")
         style_toolbar_button(self.btn_open_fov1)
@@ -2974,10 +2977,12 @@ class MainWindow(QMainWindow):
         self.btn_copy_fov2.setIcon(std_icon(self, "SP_DialogSaveButton"))
         self.btn_copy_fov2.clicked.connect(lambda: self.copy_finder_plot(2))
 
-        finder_btn_row_l.addWidget(self.btn_open_fov1); finder_btn_row_l.addWidget(self.btn_copy_fov1)
-        finder_btn_row_l.addSpacing(12)
-        finder_btn_row_l.addWidget(self.btn_open_fov2); finder_btn_row_l.addWidget(self.btn_copy_fov2)
-        finder_btn_row_l.addStretch(1)
+        finder_btn_row_l.addWidget(self.btn_open_fov1, 0, 0)
+        finder_btn_row_l.addWidget(self.btn_copy_fov1, 0, 1)
+        finder_btn_row_l.addWidget(self.btn_open_fov2, 1, 0)
+        finder_btn_row_l.addWidget(self.btn_copy_fov2, 1, 1)
+        finder_btn_row_l.setColumnStretch(0, 1)
+        finder_btn_row_l.setColumnStretch(1, 1)
         finder_l.addWidget(finder_btn_row)
 
         self.finder_tabs     = QTabWidget()
