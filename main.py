@@ -1,6 +1,7 @@
 # main.py
 from __future__ import annotations
 import sys
+import os
 import re
 from io       import BytesIO
 from dataclasses import dataclass
@@ -2317,6 +2318,7 @@ class ExposureCalculatorDialog(QDialog):
             read_noise_e=read_noise,
             gain_e_per_adu=gain,
             adc_max_adu=adc_max,
+            binning_factor=binning,
             dark_current_e_s_pix=dark_binned,
             full_well_e=full_well,
             saturation_fraction=well_fraction,
@@ -2333,6 +2335,16 @@ class ExposureCalculatorDialog(QDialog):
         self._validate_optional_color()
 
         source_geometry = str(self.etc_source_geometry.currentData() or "point")
+        if (
+            source_geometry != "extended"
+            and not simple_mode
+            and self.etc_line_flux_mode.currentData() == "surface"
+            and any(float(spin.value()) > 0.0 for spin in self.etc_line_flux.values())
+        ):
+            raise ValueError(
+                "Emission-line surface flux requires Extended / diffuse source geometry."
+            )
+
         ref_mag = float(self.etc_ref_mag.value())
         second_mag = (
             float(self.etc_color_mag.value())
@@ -2395,17 +2407,32 @@ class ExposureCalculatorDialog(QDialog):
                 if cfg.desired_peak_counts_adu is not None
                 else " · no peak-count target"
             )
-            source_desc = (
-                f"surface brightness {self.etc_ref_mag.value():.3f} mag/arcsec² "
-                f"over {target.measurement_area_arcsec2:g} arcsec²"
-                if target.source_type == "extended"
-                else f"input {self.etc_ref_mag.value():.3f} mag"
-            )
+            if target.source_type == "extended":
+                if self.etc_extended_input.currentData() == "integrated":
+                    source_desc = (
+                        f"integrated {self.etc_ref_mag.value():.3f} mag over "
+                        f"{target.measurement_area_arcsec2:g} arcsec² "
+                        f"(mean {target.reference_mag_ab:.3f} mag/arcsec²)"
+                    )
+                else:
+                    source_desc = (
+                        f"surface brightness {self.etc_ref_mag.value():.3f} mag/arcsec² "
+                        f"over {target.measurement_area_arcsec2:g} arcsec²"
+                    )
+            else:
+                source_desc = f"input {self.etc_ref_mag.value():.3f} mag"
+
             color_desc = ""
             if target.second_reference_mag is not None and target.second_reference_band:
                 color_band = core.get_reference_magnitude_band(target.second_reference_band)
+                unit = (
+                    "mag/arcsec²"
+                    if target.source_type == "extended"
+                    and self.etc_extended_input.currentData() == "surface"
+                    else "mag"
+                )
                 color_desc = (
-                    f" · color: {target.second_reference_mag:.3f} mag "
+                    f" · second band: {self.etc_color_mag.value():.3f} {unit} "
                     f"in {color_band.display_name}"
                 )
             self.etc_summary.setText(
@@ -3399,9 +3426,14 @@ class MainWindow(QMainWindow):
         self.finder_tabs.insertTab(index, new_canvas, tab_label)
         if which_fov == 1:
             self.finder_canvas_1 = new_canvas
+            new_canvas.mpl_connect(
+                "button_press_event", lambda e: self.open_finder_inspector(1)
+            )
         else:
             self.finder_canvas_2 = new_canvas
-        self._bind_finder_clicks()
+            new_canvas.mpl_connect(
+                "button_press_event", lambda e: self.open_finder_inspector(2)
+            )
 
     def _set_finder_figs(self, fig1, fig2):
         try: core.plt.close(self.finder_canvas_1.figure)
@@ -3434,6 +3466,17 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     apply_app_style(app)
+
+    if os.environ.get("RHO_PLANNER_SELF_TEST") == "1":
+        core.package_self_test()
+        w = MainWindow()
+        # Construction validates the cross-platform widget tree and the ETC
+        # controls without entering the event loop or making network requests.
+        if not hasattr(w, "btn_plan") or not hasattr(w, "btn_update_finders"):
+            raise RuntimeError("Main-window UI self-test failed.")
+        w.close()
+        sys.exit(0)
+
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
