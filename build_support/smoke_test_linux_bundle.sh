@@ -49,6 +49,9 @@ docker run --rm \
       exit 1
     fi
 
+    echo "Running offline packaged feature self-test"
+    QT_QPA_PLATFORM=offscreen RHO_PLANNER_SELF_TEST=1 /app/RHOPlanner
+
     set +e
     QT_QPA_PLATFORM=offscreen timeout 15s /app/RHOPlanner >/tmp/rho-offscreen.stdout 2>/tmp/rho-offscreen.stderr
     offscreen_code=$?
