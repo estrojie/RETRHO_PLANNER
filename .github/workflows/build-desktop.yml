@@ -60,42 +60,31 @@ jobs:
         shell: pwsh
         run: python -m unittest discover -s tests -v
 
-      - name: Build reliable folder distribution
+      - name: Build portable single-file executable
         shell: pwsh
-        run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
+        run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
 
       - name: Packaged feature self-test
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = "offscreen"
           $env:RHO_PLANNER_SELF_TEST = "1"
-          & ".\dist\RHOPlanner\RHOPlanner.exe"
+          & ".\dist-onefile\RHOPlanner.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Build portable single-file executable
-        shell: pwsh
-        run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
-
-      - name: Package Windows downloads
+      - name: Prepare Windows download
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          if (Test-Path release\RHOPlanner-Windows-x64.zip) {
-            Remove-Item release\RHOPlanner-Windows-x64.zip -Force
-          }
-          & 7z a -tzip -mx=9 release\RHOPlanner-Windows-x64.zip dist\RHOPlanner | Out-Host
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item `
             dist-onefile\RHOPlanner.exe `
             release\RHOPlanner-Windows-x64.exe
-          python -m pip freeze |
-            Out-File -Encoding utf8 release\DEPENDENCIES-Windows-x64.txt
 
-      - name: Upload Windows artifacts
+      - name: Upload Windows executable
         uses: actions/upload-artifact@v7
         with:
           name: RHOPlanner-Windows-x64
-          path: release/*
+          path: release/RHOPlanner-Windows-x64.exe
           if-no-files-found: error
 
   macos:
@@ -377,7 +366,6 @@ jobs:
           set -euo pipefail
 
           required_files=(
-            "release/RHOPlanner-Windows-x64.zip"
             "release/RHOPlanner-Windows-x64.exe"
             "release/RHOPlanner-macOS-arm64.zip"
             "release/RHOPlanner-macOS-arm64.dmg"
@@ -404,7 +392,6 @@ jobs:
           cd release
 
           sha256sum \
-            RHOPlanner-Windows-x64.zip \
             RHOPlanner-Windows-x64.exe \
             RHOPlanner-macOS-arm64.zip \
             RHOPlanner-macOS-arm64.dmg \
@@ -423,7 +410,6 @@ jobs:
           set -euo pipefail
 
           release_files=(
-            "release/RHOPlanner-Windows-x64.zip"
             "release/RHOPlanner-Windows-x64.exe"
             "release/RHOPlanner-macOS-arm64.zip"
             "release/RHOPlanner-macOS-arm64.dmg"
