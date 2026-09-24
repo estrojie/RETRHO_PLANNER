@@ -60,6 +60,14 @@ jobs:
         shell: pwsh
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
 
+      - name: Packaged feature self-test
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:RHO_PLANNER_SELF_TEST = "1"
+          & ".\dist\RHOPlanner\RHOPlanner.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build portable single-file executable
         shell: pwsh
         run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
@@ -150,6 +158,12 @@ jobs:
       - name: Build macOS application
         shell: bash
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
+
+      - name: Packaged feature self-test
+        shell: bash
+        run: |
+          QT_QPA_PLATFORM=offscreen RHO_PLANNER_SELF_TEST=1 \
+            dist/RHOPlanner.app/Contents/MacOS/RHOPlanner
 
       - name: Apply ad-hoc signature and verify bundle
         shell: bash
