@@ -402,7 +402,7 @@ class AltitudeInspectorDialog(QDialog):
     def __init__(self, parent, coords, names, min_alt, max_alt):
         super().__init__(parent)
         self.setWindowTitle("Altitude/Airmass Inspector")
-        self.resize(1100, 650)
+        fit_window_to_screen(self, 1100, 650, min_w=720, min_h=500)
 
         self.coords = list(coords)
         self.names  = list(names)
@@ -440,6 +440,24 @@ class AltitudeInspectorDialog(QDialog):
         btn_none = QPushButton("Unselect All")
         btn_none.clicked.connect(self._unselect_all)
 
+        self.btn_flip_h = QPushButton("Flip H")
+        self.btn_flip_h.setCheckable(True)
+        self.btn_flip_h.setChecked(
+            bool(getattr(parent, "in_flip_horizontal", None)
+                 and parent.in_flip_horizontal.isChecked())
+        )
+        style_toolbar_button(self.btn_flip_h)
+        self.btn_flip_h.toggled.connect(self._apply_roll_from_cache)
+
+        self.btn_flip_v = QPushButton("Flip V")
+        self.btn_flip_v.setCheckable(True)
+        self.btn_flip_v.setChecked(
+            bool(getattr(parent, "in_flip_vertical", None)
+                 and parent.in_flip_vertical.isChecked())
+        )
+        style_toolbar_button(self.btn_flip_v)
+        self.btn_flip_v.toggled.connect(self._apply_roll_from_cache)
+
         self.btn_copy_plot = QPushButton("Copy Plot")
         style_toolbar_button(self.btn_copy_plot)
         self.btn_copy_plot.setIcon(std_icon(self, "SP_DialogSaveButton"))
@@ -453,7 +471,8 @@ class AltitudeInspectorDialog(QDialog):
         cl.addWidget(btn_none)
         cl.addWidget(self.btn_copy_plot)
         cl.addWidget(self.listw, 1)
-        controls.setFixedWidth(210)
+        controls.setMinimumWidth(180)
+        controls.setMaximumWidth(250)
 
         plot_w = QWidget()
         plot_l = QVBoxLayout(plot_w)
@@ -465,6 +484,7 @@ class AltitudeInspectorDialog(QDialog):
         self._plot_widget = plot_w
         self._plot_layout = plot_l
 
+        configure_interactive_widgets(self)
         self._select_first_five()
 
     def _replace_plot(self, fig):
@@ -639,7 +659,7 @@ class FinderInspectorDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle(f"Finder Inspector (FOV{which_fov})")
-        self.resize(1250, 780)
+        fit_window_to_screen(self, 1250, 780, min_w=760, min_h=520)
 
         self.parent_window = parent
         self.which_fov     = which_fov
@@ -724,6 +744,9 @@ class FinderInspectorDialog(QDialog):
         tl.addWidget(QLabel("Roll:"));            tl.addWidget(self.roll_spin)
         tl.addSpacing(20)
         tl.addWidget(QLabel("Line thickness:")); tl.addWidget(self.lw_spin)
+        tl.addSpacing(12)
+        tl.addWidget(self.btn_flip_h)
+        tl.addWidget(self.btn_flip_v)
         tl.addStretch(1)
         tl.addWidget(self.btn_copy_plot)
         self.left_l.addWidget(top)
@@ -819,6 +842,7 @@ class FinderInspectorDialog(QDialog):
         root.setStretch(0, 4)
         root.setStretch(1, 1)
 
+        configure_interactive_widgets(self)
         self._update_title_wcs_hint()
 
     def _sizehint_for_text(self, txt: str) -> QSize:
@@ -1387,6 +1411,8 @@ class FinderInspectorDialog(QDialog):
                 self._raw_data, self._raw_wcs,
                 self._raw_fov, self._raw_survey,
                 roll_deg=new_roll,
+                flip_horizontal=self.btn_flip_h.isChecked(),
+                flip_vertical=self.btn_flip_v.isChecked(),
             )
             self._clear_annotations()
             self._replace_plot(fig)
@@ -1397,6 +1423,18 @@ class FinderInspectorDialog(QDialog):
             except Exception: pass
             try: self.parent_window.in_roll.blockSignals(False)
             except Exception: pass
+            try:
+                self.parent_window.in_flip_horizontal.blockSignals(True)
+                self.parent_window.in_flip_vertical.blockSignals(True)
+                self.parent_window.in_flip_horizontal.setChecked(self.btn_flip_h.isChecked())
+                self.parent_window.in_flip_vertical.setChecked(self.btn_flip_v.isChecked())
+            except Exception:
+                pass
+            finally:
+                try: self.parent_window.in_flip_horizontal.blockSignals(False)
+                except Exception: pass
+                try: self.parent_window.in_flip_vertical.blockSignals(False)
+                except Exception: pass
         except Exception as e:
             QMessageBox.warning(self, "Roll update failed", str(e))
 
