@@ -3561,13 +3561,31 @@ if __name__ == "__main__":
         if not hasattr(w, "btn_plan") or not hasattr(w, "btn_update_finders"):
             raise RuntimeError("Main-window UI self-test failed.")
 
+        w.show()
+        app.processEvents()
+
         etc = ExposureCalculatorDialog(w)
+        etc.show()
+        app.processEvents()
+
         if not etc.etc_target_selector.isEnabled():
             raise RuntimeError("Manual ETC target selector unexpectedly disabled.")
         if "Manual" not in etc.etc_target_selector.itemText(0):
             raise RuntimeError("Manual ETC target mode is missing.")
         if etc.etc_snr.buttonSymbols() != QAbstractSpinBox.UpDownArrows:
             raise RuntimeError("Spin-box arrow controls are not enabled.")
+
+        for spin in w.findChildren(QAbstractSpinBox) + etc.findChildren(QAbstractSpinBox):
+            if spin.height() < 28 or spin.width() < 40:
+                raise RuntimeError(
+                    f"Collapsed spin-box geometry detected: {spin.size().width()}x{spin.size().height()}"
+                )
+        for edit in w.findChildren(QLineEdit) + etc.findChildren(QLineEdit):
+            if edit.height() < 28 or edit.width() < 40:
+                raise RuntimeError(
+                    f"Collapsed text-entry geometry detected: {edit.size().width()}x{edit.size().height()}"
+                )
+
         etc.close()
         w.close()
         sys.exit(0)
