@@ -352,6 +352,9 @@ class PlanWorker(QThread):
                 coords.append(rt.coord)
                 names.append(rt.display_name)
 
+            # Stable priority ordering: lower number means higher observing priority.
+            updated.sort(key=lambda planned_row: int(planned_row.priority))
+
             alt_fig = (
                 core.plot_altitudes(
                     coords,
@@ -3110,7 +3113,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_upload_tab(), "Upload Target List")
 
         self.tbl = QTableWidget(0, 7)
-        self.tbl.setHorizontalHeaderLabels(["Name", "RA", "Dec", "Priority", "Vmag", "Visible Windows", "Notes"])
+        self.tbl.setHorizontalHeaderLabels([
+            "Name", "RA", "Dec", "Priority", "Vmag", "Altitude Windows", "Notes"
+        ])
         self.tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tbl.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tbl.itemSelectionChanged.connect(self.on_row_selected)
@@ -3319,7 +3324,10 @@ class MainWindow(QMainWindow):
         self.in_ra.setPlaceholderText("e.g. 08:52:35.8 or 133.1492")
         self.in_dec = QLineEdit()
         self.in_dec.setPlaceholderText("e.g. +28:19:51 or 28.3308")
-        self.in_pr   = QSpinBox(); self.in_pr.setRange(1, 5); self.in_pr.setValue(3)
+        self.in_pr = QSpinBox()
+        self.in_pr.setRange(1, 5)
+        self.in_pr.setValue(3)
+        self.in_pr.setToolTip("Observation priority: 1 is highest, 5 is lowest.")
 
         form.addRow("Name:",                 self.in_name)
         form.addRow("RA (hh:mm:ss OR deg):", self.in_ra)
