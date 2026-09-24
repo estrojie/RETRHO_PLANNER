@@ -360,44 +360,86 @@ def parse_radec(ra: str, dec: str) -> SkyCoord:
     ra_unit = u.deg if (_is_number(ra) and 0.0 <= float(ra) <= 360.0) else u.hourangle
     return SkyCoord(ra, dec, unit=(ra_unit, u.deg), frame="icrs")
 
-def resolve_target(name: str, ra: str, dec: str) -> ResolvedTarget:
+def lookup_v_magnitude(name: str):
+    """Best-effort Johnson V lookup. Never required for planning."""
+    name = str(name or "").strip()
+    if not name:
+        return "N/A"
+    try:
+        result = _get_simbad().query_object(name)
+        if result is not None:
+            for col_try in ("FLUX_V", "V", "flux(V)", "flux_V"):
+                if col_try in result.colnames:
+                    return result[col_try][0]
+    except Exception:
+        pass
+    return "N/A"
+
+
+def resolve_target(
+    name: str,
+    ra: str,
+    dec: str,
+    lookup_photometry: bool = False,
+) -> ResolvedTarget:
+    """Resolve a target without unnecessary network access.
+
+    Explicit RA/Dec always win and are parsed locally. Name resolution is used
+    only when coordinates are absent. Optional catalogue photometry is separate
+    so routine planning with known coordinates remains fast and offline-capable.
+    """
     name = (name or "").strip()
     ra   = (ra   or "").strip()
     dec  = (dec  or "").strip()
 
-    if name:
-        try:
-            coord = SkyCoord.from_name(name)
-            vmag  = "N/A"
-            try:
-                result = _get_simbad().query_object(name)
-                if result is not None:
-                    for col_try in ("FLUX_V", "V", "flux(V)", "flux_V"):
-                        if col_try in result.colnames:
-                            vmag = result[col_try][0]
-                            break
-            except Exception:
-                pass
-            return ResolvedTarget(display_name=name, coord=coord, vmag=vmag, method="SIMBAD name")
-        except Exception:
-            pass
+    if ra and dec:
+        coord = parse_radec(ra, dec)
+        return ResolvedTarget(
+            display_name=name if name else "Unnamed Target",
+            coord=coord,
+            vmag=lookup_v_magnitude(name) if lookup_photometry and name else "N/A",
+            method="Manual RA/Dec",
+        )
 
-    coord = parse_radec(ra, dec)
+    if not name:
+        raise ValueError("Enter a target name or provide both RA and Dec.")
+
+    try:
+        coord = SkyCoord.from_name(name)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not resolve target name {name!r}. "
+            "Check the name/network connection or enter RA/Dec directly."
+        ) from exc
+
     return ResolvedTarget(
-        display_name = name if name else "Unnamed Target",
-        coord        = coord,
-        vmag         = "N/A",
-        method       = "Manual RA/Dec",
+        display_name=name,
+        coord=coord,
+        vmag=lookup_v_magnitude(name) if lookup_photometry else "N/A",
+        method="Name resolver",
     )
 
-def planning_window_times(step_min: int = 2) -> Time:
-    obs = get_observer()
-    tz  = ZoneInfo(get_site_config().timezone)
-    d   = get_planning_date()
+def observer_for_site(site: SiteConfig) -> Observer:
+    loc = EarthLocation(
+        lat=site.lat * u.deg,
+        lon=site.lon * u.deg,
+        height=site.height_m * u.m,
+    )
+    return Observer(location=loc, timezone=site.timezone, name=site.name)
+
+
+def planning_window_times(
+    step_min: int = 2,
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
+) -> Time:
+    site_cfg = site or get_site_config()
+    d = planning_date or get_planning_date()
+    tz = ZoneInfo(site_cfg.timezone)
     start_local = datetime(d.year, d.month, d.day, 17, 0, 0, tzinfo=tz)
     start = Time(start_local)
-    end   = Time(start_local + timedelta(hours=14))
-    n     = int(np.floor(((end - start).to(u.min).value) / step_min))
+    end = Time(start_local + timedelta(hours=14))
+    n = int(np.floor(((end - start).to(u.min).value) / step_min))
     return start + np.arange(0, n + 1) * step_min * u.min
 
 
@@ -405,10 +447,15 @@ def compute_visibility_windows(
     coord: SkyCoord,
     min_alt_deg: float = DEFAULT_MIN_ALT_DEG,
     max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
-    step_min:    int   = 2,
+    step_min: int = 2,
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    obs   = get_observer()
-    times = planning_window_times(step_min=step_min)
+    site_cfg = site or get_site_config()
+    obs = get_observer() if site is None else observer_for_site(site_cfg)
+    times = planning_window_times(
+        step_min=step_min, site=site_cfg, planning_date=planning_date
+    )
     alt   = obs.altaz(times, coord).alt.deg
     mask  = (alt >= min_alt_deg) & (alt <= max_alt_deg)
 
@@ -434,7 +481,9 @@ def compute_visibility_window(
     max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
     step_min:    int   = 2,
 ) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    windows = compute_visibility_windows(coord, min_alt_deg, max_alt_deg, step_min=step_min)
+    windows = compute_visibility_windows(
+        coord, min_alt_deg, max_alt_deg, step_min=step_min
+    )
     if not windows:
         return None, None
     return windows[0][0], windows[-1][1]
@@ -513,16 +562,21 @@ def _mask_to_spans(dt_list, mask: np.ndarray):
     return spans
 
 def plot_altitudes(
-    coords:       List[SkyCoord],
-    names:        List[str],
-    min_alt_deg:  float = DEFAULT_MIN_ALT_DEG,
-    max_alt_deg:  float = DEFAULT_MAX_ALT_DEG,
-    y_mode:       str   = "altitude",
-    only_names:   Optional[List[str]] = None,
-    display_tz:   str   = "local",
+    coords: List[SkyCoord],
+    names: List[str],
+    min_alt_deg: float = DEFAULT_MIN_ALT_DEG,
+    max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
+    y_mode: str = "altitude",
+    only_names: Optional[List[str]] = None,
+    display_tz: str = "local",
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
 ) -> plt.Figure:
-    obs   = get_observer()
-    times = planning_window_times(step_min=2)
+    site_cfg = site or get_site_config()
+    obs = get_observer() if site is None else observer_for_site(site_cfg)
+    times = planning_window_times(
+        step_min=2, site=site_cfg, planning_date=planning_date
+    )
 
     if str(display_tz).lower() in ("utc", "z"):
         tz_disp, xlab = timezone.utc, "UTC"
@@ -559,7 +613,7 @@ def plot_altitudes(
         am[good] = 1.0 / np.sin(r[good])
         return am
 
-    for coord, nm in zip(coords[:5], names[:5]):
+    for coord, nm in zip(coords, names):
         alt = obs.altaz(times, coord).alt.deg
         y   = alt_to_airmass(alt) if y_mode.lower().startswith("air") else alt
         ax.plot(dts, y, "-", label=nm, linewidth=2.0)
@@ -2245,10 +2299,26 @@ def load_targets_from_file(path: str) -> pd.DataFrame:
 
     vmag_col = _pick_numeric_col(df, ["v magnitude", "V Magnitude**", "vmag", "v_mag", "mag_v", "Vmag", "V"])
 
+    def _clean_text_series(series):
+        return series.where(series.notna(), "").astype(str).replace(
+            {"nan": "", "NaN": "", "None": "", "<NA>": ""}
+        ).str.strip()
+
+    if pr_col:
+        priority = (
+            pd.to_numeric(df[pr_col], errors="coerce")
+            .fillna(3)
+            .round()
+            .clip(1, 5)
+            .astype(int)
+        )
+    else:
+        priority = pd.Series(3, index=df.index, dtype=int)
+
     return pd.DataFrame({
-        "name":     df[name_col].astype(str),
-        "ra":       df[ra_col].astype(str),
-        "dec":      df[dec_col].astype(str),
-        "priority": pd.to_numeric(df[pr_col], errors="coerce").fillna(3).astype(int) if pr_col else 3,
-        "vmag":     pd.to_numeric(df[vmag_col], errors="coerce") if vmag_col else np.nan,
+        "name": _clean_text_series(df[name_col]),
+        "ra": _clean_text_series(df[ra_col]),
+        "dec": _clean_text_series(df[dec_col]),
+        "priority": priority,
+        "vmag": pd.to_numeric(df[vmag_col], errors="coerce") if vmag_col else np.nan,
     })
