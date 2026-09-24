@@ -2104,6 +2104,30 @@ class ExposureCalculatorDialog(QDialog):
             str(getattr(row, "dec", "") or "").strip(),
         )
 
+    def _mark_manual_target(self):
+        if self._updating_target_fields or not hasattr(self, "etc_target_selector"):
+            return
+        if self.etc_target_selector.count() <= 0:
+            return
+        blocker = QSignalBlocker(self.etc_target_selector)
+        try:
+            self.etc_target_selector.setCurrentIndex(0)
+        finally:
+            del blocker
+        self.etc_target_selector.setToolTip(
+            "Manual / unplanned target mode. Enter any object name, magnitude, and band."
+        )
+
+    def _validate_optional_color(self):
+        if not self.etc_use_color.isChecked():
+            return
+        primary = str(self.etc_ref_band.currentData() or "")
+        secondary = str(self.etc_color_band.currentData() or "")
+        if primary == secondary:
+            raise ValueError(
+                "The optional color constraint must use a different second photometric band."
+            )
+
     def refresh_planner_targets(self, preferred_row=None):
         if not hasattr(self, "etc_target_selector"):
             return
@@ -2116,13 +2140,15 @@ class ExposureCalculatorDialog(QDialog):
         blocker = QSignalBlocker(self.etc_target_selector)
         try:
             self.etc_target_selector.clear()
-            if not plan:
-                self.etc_target_selector.addItem("No targets currently in planner", None)
-                self.etc_target_selector.setEnabled(False)
-                return
-
             self.etc_target_selector.setEnabled(True)
-            self.etc_target_selector.addItem("Choose a planner target…", None)
+            self.etc_target_selector.addItem("Manual / unplanned target", None)
+
+            if not plan:
+                self.etc_target_selector.setCurrentIndex(0)
+                self.etc_target_selector.setToolTip(
+                    "No planner target is required. Enter any target manually below."
+                )
+                return
 
             selected_combo_index = 0
             for plan_index, row in enumerate(plan):
@@ -2181,6 +2207,9 @@ class ExposureCalculatorDialog(QDialog):
         key = self.etc_target_selector.currentData()
         row = self._row_for_selector_key(key)
         if row is None:
+            self.etc_target_selector.setToolTip(
+                "Manual / unplanned target mode. Enter any object name, magnitude, and band."
+            )
             return
 
         self.set_target(row.name, row.vmag, planner_row=row)
@@ -2198,13 +2227,17 @@ class ExposureCalculatorDialog(QDialog):
             )
 
     def set_target(self, name: str = "", vmag=None, planner_row=None):
-        if name:
-            self.etc_target_name.setText(str(name))
-        mag = self._finite_float(vmag)
-        if mag is not None:
-            self.etc_ref_mag.setValue(mag)
-            self._set_reference_band("Johnson V")
-        self._select_planner_target(row=planner_row, name=name)
+        self._updating_target_fields = True
+        try:
+            if name:
+                self.etc_target_name.setText(str(name))
+            mag = self._finite_float(vmag)
+            if mag is not None:
+                self.etc_ref_mag.setValue(mag)
+                self._set_reference_band("Johnson V")
+            self._select_planner_target(row=planner_row, name=name)
+        finally:
+            self._updating_target_fields = False
 
     def _simple_values(self):
         cond_key = str(self.etc_conditions.currentData() or "typical")
@@ -2225,6 +2258,7 @@ class ExposureCalculatorDialog(QDialog):
             physical_scale = d["physical_pixel_scale_arcsec"]
             read_noise = d["read_noise_e"]
             gain = d["gain_e_per_adu"]
+            adc_max = d["adc_max_adu"]
             dark_physical = d["dark_current_e_s_physical_pix"]
             full_well = d["full_well_e"]
             well_fraction = d["well_fraction_pct"] / 100.0
@@ -2235,6 +2269,7 @@ class ExposureCalculatorDialog(QDialog):
             spectrum_model = "blackbody" if source_type == "star" else "flat_fnu"
             temperature = 5800.0
             line_fluxes = {name: 0.0 for name in ("H-alpha", "H-beta", "OIII", "SII")}
+            line_surface_fluxes = {name: 0.0 for name in line_fluxes}
             mode_desc = (
                 f"Quick mode · {self.etc_conditions.currentText()} conditions · "
                 f"{binning}x{binning}"
@@ -2246,6 +2281,7 @@ class ExposureCalculatorDialog(QDialog):
             physical_scale = float(self.etc_physical_pixel_scale.value())
             read_noise = float(self.etc_read_noise.value())
             gain = float(self.etc_gain.value())
+            adc_max = float(self.etc_adc_max.value())
             dark_physical = float(self.etc_dark.value())
             full_well = float(self.etc_full_well.value())
             well_fraction = float(self.etc_well_fraction.value()) / 100.0
@@ -2258,10 +2294,16 @@ class ExposureCalculatorDialog(QDialog):
             max_narrowband = float(self.etc_max_narrowband_sub.value())
             spectrum_model = str(self.etc_spectrum.currentData())
             temperature = float(self.etc_temperature.value())
-            line_fluxes = {
+            raw_lines = {
                 name: float(spin.value()) * 1.0e-14
                 for name, spin in self.etc_line_flux.items()
             }
+            if self.etc_line_flux_mode.currentData() == "surface":
+                line_surface_fluxes = raw_lines
+                line_fluxes = {name: 0.0 for name in raw_lines}
+            else:
+                line_fluxes = raw_lines
+                line_surface_fluxes = {name: 0.0 for name in raw_lines}
             mode_desc = f"Advanced mode · {binning}x{binning} binning"
 
         pixel_scale = physical_scale * binning
@@ -2274,6 +2316,7 @@ class ExposureCalculatorDialog(QDialog):
             pixel_scale_arcsec=pixel_scale,
             read_noise_e=read_noise,
             gain_e_per_adu=gain,
+            adc_max_adu=adc_max,
             dark_current_e_s_pix=dark_binned,
             full_well_e=full_well,
             saturation_fraction=well_fraction,
@@ -2287,31 +2330,54 @@ class ExposureCalculatorDialog(QDialog):
                 if self.etc_use_peak_counts.isChecked() else None
             ),
         )
+        self._validate_optional_color()
+
+        source_geometry = str(self.etc_source_geometry.currentData() or "point")
+        ref_mag = float(self.etc_ref_mag.value())
+        second_mag = (
+            float(self.etc_color_mag.value())
+            if self.etc_use_color.isChecked() else None
+        )
+        measurement_area = None
+
+        if source_geometry == "extended":
+            if self.etc_extended_input.currentData() == "integrated":
+                major = float(self.etc_major_axis.value())
+                minor = float(self.etc_minor_axis.value())
+                measurement_area = np.pi * major * minor / 4.0
+                if measurement_area <= 0.0:
+                    raise ValueError("Extended-source angular dimensions must be positive.")
+                sb_offset = 2.5 * np.log10(measurement_area)
+                ref_mag += sb_offset
+                if second_mag is not None:
+                    second_mag += sb_offset
+            else:
+                measurement_area = float(self.etc_surface_area.value())
+
         target = core.ExposureTarget(
-            reference_mag_ab=float(self.etc_ref_mag.value()),
+            reference_mag_ab=ref_mag,
             reference_band=str(self.etc_ref_band.currentData() or "Johnson V"),
             spectrum_model=spectrum_model,
             effective_temperature_k=temperature,
             target_snr=snr,
             airmass=airmass,
             line_fluxes_erg_s_cm2=line_fluxes,
-            second_reference_mag=(
-                float(self.etc_color_mag.value())
-                if self.etc_use_color.isChecked() else None
+            line_surface_fluxes_erg_s_cm2_arcsec2=line_surface_fluxes,
+            peak_line_factor=(
+                float(self.etc_peak_line_factor.value())
+                if hasattr(self, "etc_peak_line_factor") else 1.0
             ),
+            second_reference_mag=second_mag,
             second_reference_band=(
                 str(self.etc_color_band.currentData() or "")
                 if self.etc_use_color.isChecked() else None
             ),
-            source_type=str(self.etc_source_geometry.currentData() or "point"),
-            measurement_area_arcsec2=(
-                float(self.etc_surface_area.value())
-                if self.etc_source_geometry.currentData() == "extended" else None
-            ),
+            source_type=source_geometry,
+            measurement_area_arcsec2=measurement_area,
             peak_surface_brightness_mag_arcsec2=(
                 float(self.etc_peak_surface_mag.value())
                 if (
-                    self.etc_source_geometry.currentData() == "extended"
+                    source_geometry == "extended"
                     and self.etc_use_peak_surface.isChecked()
                 )
                 else None
