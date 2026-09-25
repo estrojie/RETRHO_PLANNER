@@ -2,12 +2,17 @@ name: Build desktop executables
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
     tags:
       - "v*"
 
 permissions:
   contents: read
+
+concurrency:
+  group: desktop-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHON_VERSION: "3.11"
@@ -51,33 +56,35 @@ jobs:
         shell: pwsh
         run: python -m compileall -q main.py planner_core.py build_support
 
-      - name: Build reliable folder distribution
+      - name: Run regression tests
         shell: pwsh
-        run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
+        run: python -m unittest discover -s tests -v
 
       - name: Build portable single-file executable
         shell: pwsh
         run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
 
-      - name: Package Windows downloads
+      - name: Packaged feature self-test
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:RHO_PLANNER_SELF_TEST = "1"
+          & ".\dist-onefile\RHOPlanner.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare Windows download
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Compress-Archive `
-            -Path dist\RHOPlanner `
-            -DestinationPath release\RHOPlanner-Windows-x64.zip `
-            -Force
           Copy-Item `
             dist-onefile\RHOPlanner.exe `
             release\RHOPlanner-Windows-x64.exe
-          python -m pip freeze |
-            Out-File -Encoding utf8 release\DEPENDENCIES-Windows-x64.txt
 
-      - name: Upload Windows artifacts
+      - name: Upload Windows executable
         uses: actions/upload-artifact@v7
         with:
           name: RHOPlanner-Windows-x64
-          path: release/*
+          path: release/RHOPlanner-Windows-x64.exe
           if-no-files-found: error
 
   macos:
@@ -133,6 +140,10 @@ jobs:
         shell: bash
         run: python -m compileall -q main.py planner_core.py build_support
 
+      - name: Run regression tests
+        shell: bash
+        run: python -m unittest discover -s tests -v
+
       - name: Create macOS icon
         shell: bash
         run: bash ./build_support/make_icns.sh
@@ -140,6 +151,12 @@ jobs:
       - name: Build macOS application
         shell: bash
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
+
+      - name: Packaged feature self-test
+        shell: bash
+        run: |
+          QT_QPA_PLATFORM=offscreen RHO_PLANNER_SELF_TEST=1 \
+            dist/RHOPlanner.app/Contents/MacOS/RHOPlanner
 
       - name: Apply ad-hoc signature and verify bundle
         shell: bash
@@ -231,7 +248,7 @@ jobs:
 
   linux-x64:
     name: Linux x86_64
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Check out repository
@@ -255,55 +272,53 @@ jobs:
         shell: bash
         run: python3 -m compileall -q main.py planner_core.py build_support
 
-      - name: Build in Debian 11-compatible Python container
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils patchelf ca-certificates curl file \
+            libglib2.0-0 libgl1 libegl1 \
+            libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1 xkb-data \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-image0 \
+            libxcb-render-util0 libxcb-xinerama0 libxcb-randr0 \
+            libxcb-shape0 libxcb-xfixes0 \
+            libdbus-1-3 libfontconfig1 libx11-6 libxcb1 \
+            libxext6 libxrender1 libxi6 libxrandr2 libxfixes3
+
+      - name: Install Python dependencies
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+          python -m pip freeze > release/DEPENDENCIES-Linux-x86_64.txt
 
-          docker run --rm \
-            -e RHO_PLANNER_VERSION="$RHO_PLANNER_VERSION" \
-            -v "$PWD:/work" \
-            -w /work \
-            python:3.11-bullseye \
-            bash -lc '
-              set -euo pipefail
-
-              apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                binutils \
-                patchelf \
-                ca-certificates \
-                curl \
-                file \
-                libglib2.0-0 \
-                libgl1 \
-                libegl1 \
-                libxkbcommon0 \
-                libdbus-1-3 \
-                libfontconfig1 \
-                libx11-6 \
-                libxcb1 \
-                libxext6 \
-                libxrender1 \
-                libxi6 \
-                libxrandr2 \
-                libxfixes3
-              rm -rf /var/lib/apt/lists/*
-
-              python -c "import sysconfig; enabled=int(sysconfig.get_config_var(\"Py_ENABLE_SHARED\") or 0); library=sysconfig.get_config_var(\"INSTSONAME\") or sysconfig.get_config_var(\"LDLIBRARY\"); print(f\"Py_ENABLE_SHARED={enabled}\"); print(f\"Python shared library={library}\"); assert enabled == 1, \"The selected Python does not provide a shared libpython.\""
-
-              python -m pip install --upgrade pip
-              python -m pip install -r requirements.txt -r requirements-build.txt
-              python -m PyInstaller --noconfirm --clean RHOPlanner.spec
-              python -m pip freeze > release/DEPENDENCIES-Linux-x86_64.txt
-            '
-
-          sudo chown -R "$USER":"$USER" build dist release
-
-      - name: Smoke test on Ubuntu 20.04
+      - name: Run regression tests
         shell: bash
-        run: bash ./build_support/smoke_test_linux_bundle.sh ubuntu:20.04
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Linux folder distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m PyInstaller --noconfirm --clean RHOPlanner.spec
+
+      - name: Smoke test on Ubuntu 22.04
+        shell: bash
+        run: bash ./build_support/smoke_test_linux_bundle.sh ubuntu:22.04
 
       - name: Smoke test on Linux Mint 22
         shell: bash
@@ -351,14 +366,13 @@ jobs:
           set -euo pipefail
 
           required_files=(
-            "release/RHOPlanner-Windows-x64.zip"
             "release/RHOPlanner-Windows-x64.exe"
             "release/RHOPlanner-macOS-arm64.zip"
             "release/RHOPlanner-macOS-arm64.dmg"
             "release/RHOPlanner-macOS-x86_64.zip"
             "release/RHOPlanner-macOS-x86_64.dmg"
             "release/RHOPlanner-Linux-x86_64.AppImage"
-            "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/RHOPlanner-Linux-x86_64.tar.xz"
           )
 
           for file in "${required_files[@]}"; do
@@ -378,14 +392,13 @@ jobs:
           cd release
 
           sha256sum \
-            RHOPlanner-Windows-x64.zip \
             RHOPlanner-Windows-x64.exe \
             RHOPlanner-macOS-arm64.zip \
             RHOPlanner-macOS-arm64.dmg \
             RHOPlanner-macOS-x86_64.zip \
             RHOPlanner-macOS-x86_64.dmg \
             RHOPlanner-Linux-x86_64.AppImage \
-            RHOPlanner-Linux-x86_64.tar.gz \
+            RHOPlanner-Linux-x86_64.tar.xz \
             > SHA256SUMS.txt
 
       - name: Create or update GitHub release
@@ -397,14 +410,13 @@ jobs:
           set -euo pipefail
 
           release_files=(
-            "release/RHOPlanner-Windows-x64.zip"
             "release/RHOPlanner-Windows-x64.exe"
             "release/RHOPlanner-macOS-arm64.zip"
             "release/RHOPlanner-macOS-arm64.dmg"
             "release/RHOPlanner-macOS-x86_64.zip"
             "release/RHOPlanner-macOS-x86_64.dmg"
             "release/RHOPlanner-Linux-x86_64.AppImage"
-            "release/RHOPlanner-Linux-x86_64.tar.gz"
+            "release/RHOPlanner-Linux-x86_64.tar.xz"
             "release/SHA256SUMS.txt"
           )
 

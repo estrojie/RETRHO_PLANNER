@@ -31,6 +31,6 @@ ARCH=x86_64 "$TOOL" --appimage-extract-and-run \
   "$APPDIR" "$RELEASE/RHOPlanner-Linux-x86_64.AppImage"
 chmod +x "$RELEASE/RHOPlanner-Linux-x86_64.AppImage"
 
-tar -C "$ROOT/dist" -czf "$RELEASE/RHOPlanner-Linux-x86_64.tar.gz" RHOPlanner
+tar -C "$ROOT/dist" -cJf "$RELEASE/RHOPlanner-Linux-x86_64.tar.xz" RHOPlanner
 
 echo "Created Linux release files in $RELEASE"

@@ -7,19 +7,6 @@ from zoneinfo import ZoneInfo
 import re
 import math
 
-from astroquery.skyview import SkyView
-import inspect
-
-if "grid" not in inspect.signature(SkyView.get_images).parameters:
-    _orig_get_images = SkyView.get_images
-
-    def _get_images_no_grid(*args, **kwargs):
-        kwargs.pop("grid", None)
-        return _orig_get_images(*args, **kwargs)
-
-    SkyView.get_images = _get_images_no_grid
-
-
 import numpy as np
 import pandas as pd
 import requests
@@ -35,12 +22,9 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.io import fits
 from io import BytesIO, StringIO
 from astroplan import Observer, FixedTarget
-from astroquery.simbad import Simbad
-from astroquery.vizier import Vizier
-from PIL import Image
-from scipy.ndimage import map_coordinates
-
-iers.conf.auto_download = True
+# RHO Planner ships astropy-iers-data, so use the bundled table at startup.
+# This avoids first-run network downloads delaying the GUI by several seconds.
+iers.conf.auto_download = False
 
 DEFAULT_LAT          = 29.400041
 DEFAULT_LON          = -82.585953
@@ -63,12 +47,58 @@ NWS_HEADERS = {
     "Accept": "application/geo+json,application/json",
 }
 
-custom_simbad = Simbad()
+_custom_simbad = None
+_vizier_client = None
+_skyview_class = None
 
-try:
-    custom_simbad.add_votable_fields("flux(V)")
-except Exception:
-    pass
+
+def _get_simbad():
+    """Create the SIMBAD client only when a catalogue lookup is requested."""
+    global _custom_simbad
+    if _custom_simbad is None:
+        from astroquery.simbad import Simbad
+
+        client = Simbad()
+        try:
+            client.TIMEOUT = 10
+        except Exception:
+            pass
+        try:
+            client.add_votable_fields("flux(V)")
+        except Exception:
+            pass
+        _custom_simbad = client
+    return _custom_simbad
+
+
+def _get_vizier_client():
+    """Create the VizieR client only when the finder inspector needs it."""
+    global _vizier_client
+    if _vizier_client is None:
+        from astroquery.vizier import Vizier
+
+        _vizier_client = Vizier(columns=["*"], row_limit=200)
+    return _vizier_client
+
+
+def _get_skyview_class():
+    """Import and compatibility-patch SkyView on first finder-chart request."""
+    global _skyview_class
+    if _skyview_class is None:
+        import inspect
+        from astroquery.skyview import SkyView
+
+        if "grid" not in inspect.signature(SkyView.get_images).parameters:
+            original_get_images = SkyView.get_images
+
+            def _get_images_no_grid(*args, **kwargs):
+                kwargs.pop("grid", None)
+                return original_get_images(*args, **kwargs)
+
+            SkyView.get_images = _get_images_no_grid
+
+        _skyview_class = SkyView
+    return _skyview_class
 
 def _normalize_to_uint8(data: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
     arr = np.asarray(data, dtype=float)
@@ -142,13 +172,36 @@ def _reproject_to_output_wcs(
     xin = np.asarray(xin, dtype=float)
     yin = np.asarray(yin, dtype=float)
 
+    # Bilinear sampling implemented with NumPy.  This replaces the single
+    # scipy.ndimage.map_coordinates use in the application, removing SciPy from
+    # the desktop bundle while preserving smooth finder-chart reprojection.
     fv = float(fill_value) if np.isfinite(fill_value) else 0.0
-    sampled = map_coordinates(arr, [yin, xin], order=1, mode="constant", cval=fv, prefilter=True)
-    sampled = np.asarray(sampled, dtype=float)
-
     invalid = (~np.isfinite(xin)) | (~np.isfinite(yin)) | \
               (xin < -0.5) | (yin < -0.5) | \
               (xin > (arr.shape[1] - 0.5)) | (yin > (arr.shape[0] - 0.5))
+
+    safe_x = np.where(np.isfinite(xin), xin, 0.0)
+    safe_y = np.where(np.isfinite(yin), yin, 0.0)
+    x0 = np.floor(safe_x).astype(np.int64)
+    y0 = np.floor(safe_y).astype(np.int64)
+    dx = safe_x - x0
+    dy = safe_y - y0
+
+    # A one-pixel constant border reproduces map_coordinates(mode="constant")
+    # near the image edge without an additional compiled dependency.
+    padded = np.pad(arr, 1, mode="constant", constant_values=fv)
+    x0p = np.clip(x0 + 1, 0, padded.shape[1] - 1)
+    y0p = np.clip(y0 + 1, 0, padded.shape[0] - 1)
+    x1p = np.clip(x0p + 1, 0, padded.shape[1] - 1)
+    y1p = np.clip(y0p + 1, 0, padded.shape[0] - 1)
+
+    sampled = (
+        padded[y0p, x0p] * (1.0 - dx) * (1.0 - dy)
+        + padded[y0p, x1p] * dx * (1.0 - dy)
+        + padded[y1p, x0p] * (1.0 - dx) * dy
+        + padded[y1p, x1p] * dx * dy
+    )
+    sampled = np.asarray(sampled, dtype=float)
     sampled[invalid] = np.nan
     return sampled
 
@@ -311,44 +364,86 @@ def parse_radec(ra: str, dec: str) -> SkyCoord:
     ra_unit = u.deg if (_is_number(ra) and 0.0 <= float(ra) <= 360.0) else u.hourangle
     return SkyCoord(ra, dec, unit=(ra_unit, u.deg), frame="icrs")
 
-def resolve_target(name: str, ra: str, dec: str) -> ResolvedTarget:
+def lookup_v_magnitude(name: str):
+    """Best-effort Johnson V lookup. Never required for planning."""
+    name = str(name or "").strip()
+    if not name:
+        return "N/A"
+    try:
+        result = _get_simbad().query_object(name)
+        if result is not None:
+            for col_try in ("FLUX_V", "V", "flux(V)", "flux_V"):
+                if col_try in result.colnames:
+                    return result[col_try][0]
+    except Exception:
+        pass
+    return "N/A"
+
+
+def resolve_target(
+    name: str,
+    ra: str,
+    dec: str,
+    lookup_photometry: bool = False,
+) -> ResolvedTarget:
+    """Resolve a target without unnecessary network access.
+
+    Explicit RA/Dec always win and are parsed locally. Name resolution is used
+    only when coordinates are absent. Optional catalogue photometry is separate
+    so routine planning with known coordinates remains fast and offline-capable.
+    """
     name = (name or "").strip()
     ra   = (ra   or "").strip()
     dec  = (dec  or "").strip()
 
-    if name:
-        try:
-            coord = SkyCoord.from_name(name)
-            vmag  = "N/A"
-            try:
-                result = custom_simbad.query_object(name)
-                if result is not None:
-                    for col_try in ("FLUX_V", "V", "flux(V)", "flux_V"):
-                        if col_try in result.colnames:
-                            vmag = result[col_try][0]
-                            break
-            except Exception:
-                pass
-            return ResolvedTarget(display_name=name, coord=coord, vmag=vmag, method="SIMBAD name")
-        except Exception:
-            pass
+    if ra and dec:
+        coord = parse_radec(ra, dec)
+        return ResolvedTarget(
+            display_name=name if name else "Unnamed Target",
+            coord=coord,
+            vmag=lookup_v_magnitude(name) if lookup_photometry and name else "N/A",
+            method="Manual RA/Dec",
+        )
 
-    coord = parse_radec(ra, dec)
+    if not name:
+        raise ValueError("Enter a target name or provide both RA and Dec.")
+
+    try:
+        coord = SkyCoord.from_name(name)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not resolve target name {name!r}. "
+            "Check the name/network connection or enter RA/Dec directly."
+        ) from exc
+
     return ResolvedTarget(
-        display_name = name if name else "Unnamed Target",
-        coord        = coord,
-        vmag         = "N/A",
-        method       = "Manual RA/Dec",
+        display_name=name,
+        coord=coord,
+        vmag=lookup_v_magnitude(name) if lookup_photometry else "N/A",
+        method="Name resolver",
     )
 
-def planning_window_times(step_min: int = 2) -> Time:
-    obs = get_observer()
-    tz  = ZoneInfo(get_site_config().timezone)
-    d   = get_planning_date()
+def observer_for_site(site: SiteConfig) -> Observer:
+    loc = EarthLocation(
+        lat=site.lat * u.deg,
+        lon=site.lon * u.deg,
+        height=site.height_m * u.m,
+    )
+    return Observer(location=loc, timezone=site.timezone, name=site.name)
+
+
+def planning_window_times(
+    step_min: int = 2,
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
+) -> Time:
+    site_cfg = site or get_site_config()
+    d = planning_date or get_planning_date()
+    tz = ZoneInfo(site_cfg.timezone)
     start_local = datetime(d.year, d.month, d.day, 17, 0, 0, tzinfo=tz)
     start = Time(start_local)
-    end   = Time(start_local + timedelta(hours=14))
-    n     = int(np.floor(((end - start).to(u.min).value) / step_min))
+    end = Time(start_local + timedelta(hours=14))
+    n = int(np.floor(((end - start).to(u.min).value) / step_min))
     return start + np.arange(0, n + 1) * step_min * u.min
 
 
@@ -356,10 +451,15 @@ def compute_visibility_windows(
     coord: SkyCoord,
     min_alt_deg: float = DEFAULT_MIN_ALT_DEG,
     max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
-    step_min:    int   = 2,
+    step_min: int = 2,
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    obs   = get_observer()
-    times = planning_window_times(step_min=step_min)
+    site_cfg = site or get_site_config()
+    obs = get_observer() if site is None else observer_for_site(site_cfg)
+    times = planning_window_times(
+        step_min=step_min, site=site_cfg, planning_date=planning_date
+    )
     alt   = obs.altaz(times, coord).alt.deg
     mask  = (alt >= min_alt_deg) & (alt <= max_alt_deg)
 
@@ -385,7 +485,9 @@ def compute_visibility_window(
     max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
     step_min:    int   = 2,
 ) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    windows = compute_visibility_windows(coord, min_alt_deg, max_alt_deg, step_min=step_min)
+    windows = compute_visibility_windows(
+        coord, min_alt_deg, max_alt_deg, step_min=step_min
+    )
     if not windows:
         return None, None
     return windows[0][0], windows[-1][1]
@@ -398,14 +500,37 @@ def format_visibility_windows(
         return "—"
     return "; ".join(f"{t1.strftime(time_fmt)}–{t2.strftime(time_fmt)}" for t1, t2 in windows)
 
-def sky_conditions(timeout_s: float = 6.0) -> Dict[str, Any]:
-    out  = {}
-    obs  = get_observer()
-    site = get_site_config()
-    out.update(get_cloud_cover_now_next(site.lat, site.lon, timeout_s=timeout_s))
+def sky_conditions(
+    timeout_s: float = 6.0,
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
+) -> Dict[str, Any]:
+    """Return sky conditions for an immutable site/date snapshot."""
+    out = {}
+    site_cfg = site or get_site_config()
+    d = planning_date or get_planning_date()
 
-    tz     = ZoneInfo(site.timezone)
-    d      = get_planning_date()
+    if site is None:
+        obs = get_observer()
+    else:
+        loc = EarthLocation(
+            lat=site_cfg.lat * u.deg,
+            lon=site_cfg.lon * u.deg,
+            height=site_cfg.height_m * u.m,
+        )
+        obs = Observer(
+            location=loc,
+            timezone=site_cfg.timezone,
+            name=site_cfg.name,
+        )
+
+    out.update(
+        get_cloud_cover_now_next(
+            site_cfg.lat, site_cfg.lon, timeout_s=timeout_s
+        )
+    )
+
+    tz = ZoneInfo(site_cfg.timezone)
     anchor = Time(datetime(d.year, d.month, d.day, 20, 0, 0, tzinfo=tz))
 
     try:
@@ -441,16 +566,21 @@ def _mask_to_spans(dt_list, mask: np.ndarray):
     return spans
 
 def plot_altitudes(
-    coords:       List[SkyCoord],
-    names:        List[str],
-    min_alt_deg:  float = DEFAULT_MIN_ALT_DEG,
-    max_alt_deg:  float = DEFAULT_MAX_ALT_DEG,
-    y_mode:       str   = "altitude",
-    only_names:   Optional[List[str]] = None,
-    display_tz:   str   = "local",
+    coords: List[SkyCoord],
+    names: List[str],
+    min_alt_deg: float = DEFAULT_MIN_ALT_DEG,
+    max_alt_deg: float = DEFAULT_MAX_ALT_DEG,
+    y_mode: str = "altitude",
+    only_names: Optional[List[str]] = None,
+    display_tz: str = "local",
+    site: SiteConfig | None = None,
+    planning_date: date | None = None,
 ) -> plt.Figure:
-    obs   = get_observer()
-    times = planning_window_times(step_min=2)
+    site_cfg = site or get_site_config()
+    obs = get_observer() if site is None else observer_for_site(site_cfg)
+    times = planning_window_times(
+        step_min=2, site=site_cfg, planning_date=planning_date
+    )
 
     if str(display_tz).lower() in ("utc", "z"):
         tz_disp, xlab = timezone.utc, "UTC"
@@ -487,7 +617,7 @@ def plot_altitudes(
         am[good] = 1.0 / np.sin(r[good])
         return am
 
-    for coord, nm in zip(coords[:5], names[:5]):
+    for coord, nm in zip(coords, names):
         alt = obs.altaz(times, coord).alt.deg
         y   = alt_to_airmass(alt) if y_mode.lower().startswith("air") else alt
         ax.plot(dts, y, "-", label=nm, linewidth=2.0)
@@ -526,7 +656,7 @@ def plot_altitudes(
 def _get_skyview_hdu(coord: SkyCoord, fov_arcmin: int, pixels: int, surveys: List[str]):
     for survey in surveys:
         try:
-            hdus = SkyView.get_images(
+            hdus = _get_skyview_class().get_images(
                 position = coord,
                 survey   = [survey],
                 height   = fov_arcmin * u.arcmin,
@@ -699,6 +829,8 @@ def render_finder_figure_from_data(
     survey_label: str,
     roll_deg:     float      = 0.0,
     fov_h_arcmin: int | None = None,
+    flip_horizontal: bool = False,
+    flip_vertical: bool = False,
 ) -> plt.Figure:
     fov_w = _clamp_fov(fov_w_arcmin)
     fov_h = _clamp_fov(fov_h_arcmin if fov_h_arcmin is not None else fov_w)
@@ -750,6 +882,10 @@ def render_finder_figure_from_data(
     ax.set_facecolor("black")
     ax.imshow(plot_masked, origin="lower", vmin=vmin, vmax=vmax,
               cmap="gray", interpolation="nearest")
+    if flip_horizontal:
+        ax.invert_xaxis()
+    if flip_vertical:
+        ax.invert_yaxis()
 
     try:
         for axis_idx, pos in ((0, "b"), (1, "l")):
@@ -769,12 +905,21 @@ def render_finder_figure_from_data(
     title   = f"{name} — {survey_label} — {fov_str}"
     if abs(float(roll_deg)) > 1e-9:
         title += f" — Roll={float(roll_deg):.1f}°"
+    flips = []
+    if flip_horizontal:
+        flips.append("H")
+    if flip_vertical:
+        flips.append("V")
+    if flips:
+        title += " — Flip " + "+".join(flips)
     fig.suptitle(title, color="white", fontsize=13, y=0.985)
 
     ax._rho_roll_deg     = 0.0
     ax._rho_data_shape   = np.asarray(data_plot).shape
     ax._rho_wcs          = wcs_plot
     ax._rho_display_roll = float(roll_deg)
+    ax._rho_flip_horizontal = bool(flip_horizontal)
+    ax._rho_flip_vertical = bool(flip_vertical)
 
     ax.format_coord = lambda x, y: format_finder_cursor(wcs_plot, x, y, include_pixel=True)
 
@@ -819,8 +964,6 @@ def finder_figure(
         return _empty_finder_figure(name, fov_w_arcmin, fov_h_arcmin)
     return render_finder_figure_from_data(coord, name, data, wcs, fov_w_arcmin, label,
                                           roll_deg, fov_h_arcmin=fov_h_arcmin)
-
-_vizier_client = Vizier(columns=["*"], row_limit=200)
 
 def _catalog_text(value: Any) -> str:
     if value is None:
@@ -872,6 +1015,145 @@ def _row_first(row: Any, names: tuple[str, ...]) -> Any:
             except Exception:
                 continue
     return None
+
+def _friendly_identifier_priority(identifier: str) -> tuple[int, int, str]:
+    """Rank SIMBAD aliases by how useful they are to a human observer."""
+    raw = re.sub(r"\s+", " ", str(identifier or "")).strip()
+    up = raw.upper()
+    if not raw:
+        return (99, 999, "")
+
+    # SIMBAD's NAME entries are established/common proper names.
+    if up.startswith("NAME "):
+        return (0, len(raw), raw[5:].strip())
+
+    cleaned = raw
+    if cleaned.startswith("* "):
+        cleaned = cleaned[2:].strip()
+    cup = cleaned.upper()
+
+    # Common observing/catalog identifiers before machine-generated IDs.
+    if re.match(r"^\d+\s+[A-Z]{3,4}$", cup):
+        return (1, len(cleaned), cleaned)  # Flamsteed, e.g. 55 Cnc
+    if cup.startswith(("HD ", "HR ", "HIP ", "GJ ", "GL ", "BD", "CD", "CPD")):
+        return (2, len(cleaned), cleaned)
+    if cup.startswith(("SAO ", "WDS ", "LHS ", "LTT ", "TYC ")):
+        return (3, len(cleaned), cleaned)
+    if raw.startswith("* "):
+        return (4, len(cleaned), cleaned)  # Bayer/designation from SIMBAD
+    if cup.startswith("GAIA "):
+        return (20, len(cleaned), cleaned)
+    return (6, len(cleaned), cleaned)
+
+
+def _simbad_identifier_aliases(seed_identifier: str) -> List[str]:
+    """Return SIMBAD aliases for one identifier, best-effort and non-fatal."""
+    seed = _catalog_text(seed_identifier)
+    if not seed:
+        return []
+    try:
+        table = _get_simbad().query_objectids(seed)
+    except Exception:
+        return []
+    if table is None:
+        return []
+
+    aliases: List[str] = []
+    for row in table:
+        raw = _row_first(row, ("ID", "id", "identifier"))
+        text = _catalog_text(raw)
+        # _catalog_text removes NAME; preserve NAME semantics if possible by
+        # reading the raw string separately.
+        try:
+            raw_text = re.sub(r"\s+", " ", str(raw)).strip()
+        except Exception:
+            raw_text = text
+        value = raw_text if raw_text else text
+        if value and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
+def _enrich_candidate_identifiers(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Prefer proper/common/catalog names over Gaia source IDs."""
+    result = dict(candidate)
+    existing = [str(x) for x in result.get("aliases", []) if str(x).strip()]
+
+    # Prefer a SIMBAD/non-Gaia seed when the cross-catalog merge already found one.
+    seed_candidates = sorted(
+        existing,
+        key=lambda x: (
+            1 if x.upper().startswith("GAIA ") else 0,
+            _friendly_identifier_priority(x),
+        ),
+    )
+    seeds = seed_candidates[:2] or [str(result.get("main_id", ""))]
+
+    aliases = list(existing)
+    for seed in seeds:
+        for alias in _simbad_identifier_aliases(seed):
+            if alias not in aliases:
+                aliases.append(alias)
+
+    # If the merged result only had Gaia/Tycho, ask SIMBAD for the closest
+    # object at the selected astrometric position and use that as another seed.
+    if not any(not a.upper().startswith(("GAIA ", "TYC ")) for a in aliases):
+        try:
+            table = _get_simbad().query_region(result["coord"], radius=3.0 * u.arcsec)
+            if table is not None and len(table):
+                simbad_id = _catalog_text(_row_first(table[0], ("MAIN_ID", "main_id")))
+                if simbad_id:
+                    if simbad_id not in aliases:
+                        aliases.append(simbad_id)
+                    for alias in _simbad_identifier_aliases(simbad_id):
+                        if alias not in aliases:
+                            aliases.append(alias)
+        except Exception:
+            pass
+
+    ranked = []
+    seen_friendly = set()
+    for alias in aliases:
+        priority, length, friendly = _friendly_identifier_priority(alias)
+        friendly = _catalog_text(friendly)
+        if not friendly:
+            continue
+        key = friendly.upper()
+        if key in seen_friendly:
+            continue
+        seen_friendly.add(key)
+        ranked.append((priority, length, friendly))
+    ranked.sort()
+
+    if ranked:
+        result["main_id"] = ranked[0][2]
+        result["aliases"] = [entry[2] for entry in ranked]
+        # A friendly SIMBAD alias is descriptive even when Gaia supplied the
+        # best astrometry/magnitude.
+        if ranked[0][0] < 20:
+            result["name_source"] = "SIMBAD identifiers"
+    return result
+
+
+def placeholder_figure(message: str, figsize=(7.8, 4.9)) -> plt.Figure:
+    """Dark themed placeholder used before a plot/finder chart exists."""
+    fig = plt.figure(figsize=figsize)
+    fig.patch.set_facecolor("#111318")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("#111318")
+    ax.text(
+        0.5, 0.5, str(message),
+        ha="center", va="center",
+        color="#9aa4b2", fontsize=11,
+        transform=ax.transAxes,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_color("#2f3540")
+    plt.close(fig)
+    return fig
+
 
 def _identifier_priority(identifier: str, catalog: str) -> int:
     ident = _catalog_text(identifier)
@@ -977,7 +1259,7 @@ def identify_star_at_coord(
     candidates: List[Dict[str, Any]] = []
 
     try:
-        tables = _vizier_client.query_region(click, radius=rad, catalog="I/355/gaiadr3")
+        tables = _get_vizier_client().query_region(click, radius=rad, catalog="I/355/gaiadr3")
         if tables and len(tables) > 0:
             tbl = tables[0]
             for row in tbl:
@@ -997,7 +1279,7 @@ def identify_star_at_coord(
         pass
 
     try:
-        tables = _vizier_client.query_region(click, radius=rad, catalog="I/259/tyc2")
+        tables = _get_vizier_client().query_region(click, radius=rad, catalog="I/259/tyc2")
         if tables and len(tables) > 0:
             tbl = tables[0]
             for row in tbl:
@@ -1025,7 +1307,7 @@ def identify_star_at_coord(
         pass
 
     try:
-        simbad_tap = Simbad()
+        simbad_tap = _get_simbad()
         ra_deg = float(click.ra.deg)
         dec_deg = float(click.dec.deg)
         rad_deg = radius_arcsec / 3600.0
@@ -1056,7 +1338,7 @@ def identify_star_at_coord(
                     candidates.append(cand)
     except Exception:
         try:
-            simbad_tap = Simbad()
+            simbad_tap = _get_simbad()
             ra_deg = float(click.ra.deg)
             dec_deg = float(click.dec.deg)
             rad_deg = radius_arcsec / 3600.0
@@ -1105,6 +1387,7 @@ def identify_star_at_coord(
         )
 
     best = min(pool, key=_brightness_key)
+    best = _enrich_candidate_identifiers(best)
     mag = best.get("mag")
     band = best.get("mag_band")
     return {
@@ -1192,6 +1475,24 @@ REFERENCE_MAGNITUDE_BANDS: Dict[str, ReferenceMagnitudeBandSpec] = {
     "Sloan z": ReferenceMagnitudeBandSpec(
         "Sloan z", "Sloan z (AB)", "Sloan", 913.0, 3631.0, "AB"),
 
+    "Pan-STARRS g": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS g", "Pan-STARRS g (AB)", "Pan-STARRS", 481.0, 3631.0, "AB"),
+    "Pan-STARRS r": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS r", "Pan-STARRS r (AB)", "Pan-STARRS", 617.0, 3631.0, "AB"),
+    "Pan-STARRS i": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS i", "Pan-STARRS i (AB)", "Pan-STARRS", 752.0, 3631.0, "AB"),
+    "Pan-STARRS z": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS z", "Pan-STARRS z (AB)", "Pan-STARRS", 866.0, 3631.0, "AB"),
+    "Pan-STARRS y": ReferenceMagnitudeBandSpec(
+        "Pan-STARRS y", "Pan-STARRS y (AB)", "Pan-STARRS", 962.0, 3631.0, "AB"),
+
+    "2MASS J": ReferenceMagnitudeBandSpec(
+        "2MASS J", "2MASS J (Vega)", "2MASS", 1235.0, 1594.0, "Vega"),
+    "2MASS H": ReferenceMagnitudeBandSpec(
+        "2MASS H", "2MASS H (Vega)", "2MASS", 1662.0, 1024.0, "Vega"),
+    "2MASS Ks": ReferenceMagnitudeBandSpec(
+        "2MASS Ks", "2MASS K_s (Vega)", "2MASS", 2159.0, 666.7, "Vega"),
+
     "H-alpha": ReferenceMagnitudeBandSpec(
         "H-alpha", "H-alpha (AB)", "Narrowband", 656.3, 3631.0, "AB"),
     "H-beta": ReferenceMagnitudeBandSpec(
@@ -1209,6 +1510,7 @@ _REFERENCE_BAND_ALIASES_EXACT: Dict[str, str] = {
     "G": "Gaia G", "BP": "Gaia BP", "RP": "Gaia RP",
     "u": "Sloan u", "g": "Sloan g", "r": "Sloan r",
     "i": "Sloan i", "z": "Sloan z",
+    "J": "2MASS J", "H": "2MASS H", "Ks": "2MASS Ks",
 }
 
 _REFERENCE_BAND_ALIASES_NORMALIZED: Dict[str, str] = {
@@ -1227,6 +1529,16 @@ _REFERENCE_BAND_ALIASES_NORMALIZED: Dict[str, str] = {
     "sloan r": "Sloan r", "sdss r": "Sloan r", "rprime": "Sloan r",
     "sloan i": "Sloan i", "sdss i": "Sloan i", "iprime": "Sloan i",
     "sloan z": "Sloan z", "sdss z": "Sloan z", "zprime": "Sloan z",
+    "pan starrs g": "Pan-STARRS g", "ps1 g": "Pan-STARRS g", "ps g": "Pan-STARRS g",
+    "pan starrs r": "Pan-STARRS r", "ps1 r": "Pan-STARRS r", "ps r": "Pan-STARRS r",
+    "pan starrs i": "Pan-STARRS i", "ps1 i": "Pan-STARRS i", "ps i": "Pan-STARRS i",
+    "pan starrs z": "Pan-STARRS z", "ps1 z": "Pan-STARRS z", "ps z": "Pan-STARRS z",
+    "pan starrs y": "Pan-STARRS y", "ps1 y": "Pan-STARRS y", "ps y": "Pan-STARRS y",
+    "2mass j": "2MASS J", "jmag": "2MASS J",
+    "2mass h": "2MASS H", "hmag": "2MASS H",
+    "2mass ks": "2MASS Ks", "2mass k": "2MASS Ks", "ksmag": "2MASS Ks",
+    "apass b": "Johnson B", "apass v": "Johnson V",
+    "apass g": "Sloan g", "apass r": "Sloan r", "apass i": "Sloan i",
     "halpha": "H-alpha", "h alpha": "H-alpha", "h-alpha": "H-alpha",
     "hbeta": "H-beta", "h beta": "H-beta", "h-beta": "H-beta",
     "oiii": "OIII", "o iii": "OIII", "sii": "SII", "s ii": "SII",
@@ -1257,7 +1569,7 @@ def get_reference_magnitude_band(value: str) -> ReferenceMagnitudeBandSpec:
 def reference_magnitude_band_groups() -> List[Tuple[str, List[ReferenceMagnitudeBandSpec]]]:
     """Ordered groups used by the exposure-calculator combo box."""
     groups: List[Tuple[str, List[ReferenceMagnitudeBandSpec]]] = []
-    for family in ("Johnson / Cousins", "Gaia DR3", "Sloan", "Narrowband"):
+    for family in ("Johnson / Cousins", "Gaia DR3", "Sloan", "Pan-STARRS", "2MASS", "Narrowband"):
         specs = [s for s in REFERENCE_MAGNITUDE_BANDS.values() if s.family == family]
         if specs:
             groups.append((family, specs))
@@ -1280,7 +1592,9 @@ class ExposureCalculatorConfig:
     pixel_scale_arcsec: float = 1.62
     read_noise_e: float = 9.3
     gain_e_per_adu: float = 0.37
-    dark_current_e_s_pix: float = 1.35 
+    adc_max_adu: float = 65535.0
+    binning_factor: int = 1
+    dark_current_e_s_pix: float = 1.35
     full_well_e: float = 25500.0
     saturation_fraction: float = 0.80
     seeing_fwhm_arcsec: float = 10.3
@@ -1300,6 +1614,13 @@ class ExposureTarget:
     target_snr: float = 100.0
     airmass: float = 1.2
     line_fluxes_erg_s_cm2: Optional[Dict[str, float]] = None
+    line_surface_fluxes_erg_s_cm2_arcsec2: Optional[Dict[str, float]] = None
+    peak_line_factor: float = 1.0
+    second_reference_mag: Optional[float] = None
+    second_reference_band: Optional[str] = None
+    source_type: str = "point"
+    measurement_area_arcsec2: Optional[float] = None
+    peak_surface_brightness_mag_arcsec2: Optional[float] = None
 
 
 def _planck_bnu_at_lambda(lambda_nm: float, temperature_k: float) -> float:
@@ -1320,27 +1641,125 @@ def reference_magnitude_fnu_w_m2_hz(
     fnu0 = float(spec.zero_point_jy) * 1.0e-26
     return float(fnu0 * 10.0 ** (-0.4 * float(magnitude)))
 
+COLOR_MIN_WAVELENGTH_SEPARATION_RATIO = 1.03
+COLOR_MAX_EXTRAPOLATION_RATIO = 1.80
+
+
+def color_constraint_status(
+    reference_band: str,
+    second_reference_band: Optional[str],
+    filter_name: str,
+) -> tuple[bool, str]:
+    """Return whether a two-band color is safe to use for the requested filter."""
+    if not second_reference_band:
+        return False, "no second band"
+
+    ref_spec = get_reference_magnitude_band(reference_band)
+    second_spec = get_reference_magnitude_band(second_reference_band)
+    if ref_spec.key == second_spec.key:
+        return False, "same photometric band"
+
+    lam1 = float(ref_spec.central_nm)
+    lam2 = float(second_spec.central_nm)
+    lo, hi = min(lam1, lam2), max(lam1, lam2)
+    if hi / max(lo, 1e-12) < COLOR_MIN_WAVELENGTH_SEPARATION_RATIO:
+        return False, "bands are too close in wavelength"
+
+    lamf = float(EXPOSURE_FILTERS[str(filter_name)].central_nm)
+    if lo <= lamf <= hi:
+        return True, "interpolation"
+
+    nearest = lo if lamf < lo else hi
+    ratio = max(lamf, nearest) / max(min(lamf, nearest), 1e-12)
+    if ratio <= COLOR_MAX_EXTRAPOLATION_RATIO:
+        return True, "moderate extrapolation"
+    return False, "target filter is too far outside the color baseline"
+
+
+def _color_powerlaw_alpha(
+    reference_mag: float,
+    reference_band: str,
+    second_reference_mag: float,
+    second_reference_band: str,
+) -> Optional[float]:
+    ref_spec = get_reference_magnitude_band(reference_band)
+    second_spec = get_reference_magnitude_band(second_reference_band)
+    if ref_spec.key == second_spec.key:
+        return None
+
+    fnu_ref = reference_magnitude_fnu_w_m2_hz(reference_mag, ref_spec.key)
+    fnu_second = reference_magnitude_fnu_w_m2_hz(
+        second_reference_mag, second_spec.key
+    )
+    nu_ref = _LIGHT_C / (float(ref_spec.central_nm) * 1e-9)
+    nu_second = _LIGHT_C / (float(second_spec.central_nm) * 1e-9)
+    denom = np.log(nu_second / nu_ref)
+    if (
+        fnu_ref <= 0.0
+        or fnu_second <= 0.0
+        or not np.isfinite(fnu_ref + fnu_second + denom)
+        or abs(float(denom)) <= 1e-12
+    ):
+        return None
+    alpha = np.log(fnu_second / fnu_ref) / denom
+    return float(alpha) if np.isfinite(alpha) else None
+
+
 def estimate_filter_ab_magnitude(
     reference_mag_ab: float,
     reference_band: str,
     filter_name: str,
     spectrum_model: str = "blackbody",
     effective_temperature_k: float = 5800.0,
+    second_reference_mag: Optional[float] = None,
+    second_reference_band: Optional[str] = None,
 ) -> float:
+    """Estimate an AB magnitude in an RHO filter.
+
+    When a second observed magnitude is supplied, the two calibrated flux
+    densities define a local power-law color slope in f_nu.  This is preferable
+    to guessing a stellar temperature or flat spectrum when catalog color
+    information is available.  Without a second band, the selected blackbody
+    or flat-f_nu fallback is used.
+    """
     ref_spec = get_reference_magnitude_band(reference_band)
     fnu_ref = reference_magnitude_fnu_w_m2_hz(reference_mag_ab, ref_spec.key)
-    model = str(spectrum_model or "flat_fnu").strip().lower()
+    filt_nm = EXPOSURE_FILTERS[str(filter_name)].central_nm
 
-    if model in {"flat", "flat_fnu", "flat fnu", "constant fnu"}:
-        fnu_filter = fnu_ref
-    else:
-        filt_nm = EXPOSURE_FILTERS[str(filter_name)].central_nm
-        b_ref = _planck_bnu_at_lambda(ref_spec.central_nm, effective_temperature_k)
-        b_fil = _planck_bnu_at_lambda(filt_nm, effective_temperature_k)
-        if b_ref <= 0.0 or b_fil <= 0.0 or not np.isfinite(b_ref + b_fil):
+    fnu_filter = None
+    if second_reference_mag is not None and second_reference_band:
+        try:
+            allowed, _reason = color_constraint_status(
+                ref_spec.key, second_reference_band, str(filter_name)
+            )
+            alpha = (
+                _color_powerlaw_alpha(
+                    float(reference_mag_ab),
+                    ref_spec.key,
+                    float(second_reference_mag),
+                    second_reference_band,
+                )
+                if allowed
+                else None
+            )
+            if alpha is not None:
+                nu_ref = _LIGHT_C / (float(ref_spec.central_nm) * 1e-9)
+                nu_filter = _LIGHT_C / (float(filt_nm) * 1e-9)
+                fnu_filter = fnu_ref * (nu_filter / nu_ref) ** alpha
+        except Exception:
+            fnu_filter = None
+
+    if fnu_filter is None:
+        model = str(spectrum_model or "flat_fnu").strip().lower()
+        if model in {"flat", "flat_fnu", "flat fnu", "constant fnu"}:
             fnu_filter = fnu_ref
         else:
-            fnu_filter = fnu_ref * (b_fil / b_ref)
+            b_ref = _planck_bnu_at_lambda(ref_spec.central_nm, effective_temperature_k)
+            b_fil = _planck_bnu_at_lambda(filt_nm, effective_temperature_k)
+            if b_ref <= 0.0 or b_fil <= 0.0 or not np.isfinite(b_ref + b_fil):
+                fnu_filter = fnu_ref
+            else:
+                fnu_filter = fnu_ref * (b_fil / b_ref)
 
     if not np.isfinite(fnu_filter) or fnu_filter <= 0.0:
         return float("inf")
@@ -1359,6 +1778,18 @@ def emission_line_photon_flux_m2_s(line_flux_erg_s_cm2: float, wavelength_nm: fl
     flux_w_m2 = max(0.0, float(line_flux_erg_s_cm2)) * 1e-3
     photon_energy_j = _PLANCK_H * _LIGHT_C / (float(wavelength_nm) * 1e-9)
     return flux_w_m2 / photon_energy_j if photon_energy_j > 0 else 0.0
+
+def rayleigh_to_erg_s_cm2_arcsec2(rayleigh: float, wavelength_nm: float) -> float:
+    """Convert line surface brightness in Rayleighs to cgs per square arcsecond."""
+    r = max(0.0, float(rayleigh))
+    photons_cm2_s_sr = r * 1.0e6 / (4.0 * np.pi)
+    arcsec2_per_sr = (180.0 * 3600.0 / np.pi) ** 2
+    photons_cm2_s_arcsec2 = photons_cm2_s_sr / arcsec2_per_sr
+    photon_energy_erg = (
+        _PLANCK_H * _LIGHT_C / (float(wavelength_nm) * 1e-9)
+    ) * 1.0e7
+    return float(photons_cm2_s_arcsec2 * photon_energy_erg)
+
 
 def _solve_exposure_time_s(
     source_rate_e_s: float,
@@ -1431,6 +1862,12 @@ def calculate_exposure_times(
         raise ValueError("Target S/N must be positive.")
     if config.gain_e_per_adu <= 0.0:
         raise ValueError("Camera gain must be positive.")
+    if config.adc_max_adu <= 0.0:
+        raise ValueError("Camera ADC maximum must be positive.")
+    if int(config.binning_factor) < 1:
+        raise ValueError("Binning factor must be at least 1.")
+    if target.peak_line_factor <= 0.0:
+        raise ValueError("Peak/mean line-brightness factor must be positive.")
     if (config.desired_peak_counts_adu is not None
             and float(config.desired_peak_counts_adu) <= 0.0):
         raise ValueError("Desired peak counts must be positive or disabled.")
@@ -1440,7 +1877,21 @@ def calculate_exposure_times(
     radius_arcsec = max(0.1, float(config.aperture_radius_fwhm) * seeing)
     sigma_arcsec = seeing / 2.354820045
     encircled = 1.0 - np.exp(-(radius_arcsec**2) / (2.0 * sigma_arcsec**2))
-    aperture_area_arcsec2 = np.pi * radius_arcsec**2
+
+    source_type = str(target.source_type or "point").strip().lower()
+    is_extended = source_type in {"extended", "diffuse", "nebula", "galaxy"}
+    if is_extended:
+        aperture_area_arcsec2 = max(
+            1e-6,
+            float(target.measurement_area_arcsec2 or 0.0),
+        )
+        if aperture_area_arcsec2 <= 1e-6:
+            raise ValueError(
+                "Extended/diffuse sources require a positive measurement area."
+            )
+    else:
+        aperture_area_arcsec2 = np.pi * radius_arcsec**2
+
     n_pix = max(1.0, aperture_area_arcsec2 / float(config.pixel_scale_arcsec) ** 2)
 
     p = float(config.pixel_scale_arcsec)
@@ -1448,15 +1899,28 @@ def calculate_exposure_times(
     peak_fraction = float(np.clip(peak_fraction, 1e-6, 1.0))
 
     line_fluxes = target.line_fluxes_erg_s_cm2 or {}
+    line_surface_fluxes = target.line_surface_fluxes_erg_s_cm2_arcsec2 or {}
     results: List[Dict[str, Any]] = []
 
     for name, spec in EXPOSURE_FILTERS.items():
+        color_used = False
+        color_reason = ""
+        if target.second_reference_mag is not None and target.second_reference_band:
+            try:
+                color_used, color_reason = color_constraint_status(
+                    target.reference_band, target.second_reference_band, name
+                )
+            except Exception as exc:
+                color_reason = str(exc)
+
         mag = estimate_filter_ab_magnitude(
             target.reference_mag_ab,
             target.reference_band,
             name,
             target.spectrum_model,
             target.effective_temperature_k,
+            target.second_reference_mag,
+            target.second_reference_band,
         )
 
         atmospheric_transmission = 10.0 ** (
@@ -1473,13 +1937,31 @@ def calculate_exposure_times(
             mag, spec.central_nm, spec.width_nm
         )
         line_flux = float(line_fluxes.get(spec.line_key or "", 0.0) or 0.0)
+        line_surface_flux = float(
+            line_surface_fluxes.get(spec.line_key or "", 0.0) or 0.0
+        )
+        effective_line_flux = line_flux
+        if is_extended and line_surface_flux > 0.0:
+            effective_line_flux += line_surface_flux * aperture_area_arcsec2
+
         line_photons = (
-            emission_line_photon_flux_m2_s(line_flux, spec.central_nm)
+            emission_line_photon_flux_m2_s(effective_line_flux, spec.central_nm)
             if spec.line_key else 0.0
         )
 
-        total_source_e_s = (continuum_photons + line_photons) * collecting_area_m2 * throughput
-        source_rate_e_s = total_source_e_s * encircled
+        continuum_source_e_s = continuum_photons * collecting_area_m2 * throughput
+        line_source_e_s = line_photons * collecting_area_m2 * throughput
+
+        if is_extended:
+            # The input magnitude is interpreted as surface brightness.
+            # Continuum is integrated across the measurement area; line inputs
+            # have already been converted to an integrated aperture flux above.
+            continuum_total_e_s = continuum_source_e_s * aperture_area_arcsec2
+            total_source_e_s = continuum_total_e_s + line_source_e_s
+            source_rate_e_s = total_source_e_s
+        else:
+            total_source_e_s = continuum_source_e_s + line_source_e_s
+            source_rate_e_s = total_source_e_s * encircled
 
         sky_photons_arcsec2 = ab_magnitude_photon_flux_m2_s(
             spec.sky_ab_mag_arcsec2, spec.central_nm, spec.width_nm
@@ -1490,13 +1972,77 @@ def calculate_exposure_times(
         background_rate_e_s = sky_rate_e_s + dark_rate_e_s
         read_variance_e2 = n_pix * max(0.0, float(config.read_noise_e)) ** 2
 
-        peak_rate_e_s = (
-            total_source_e_s * peak_fraction
-            + sky_rate_e_s_arcsec2 * p**2
-            + max(0.0, float(config.dark_current_e_s_pix))
+        if is_extended:
+            # S/N uses the mean surface brightness over the measurement area.
+            # Saturation can instead use an independently supplied peak surface
+            # brightness, which handles bright nuclei, knots, and filaments.
+            if target.peak_surface_brightness_mag_arcsec2 is not None:
+                peak_mag = estimate_filter_ab_magnitude(
+                    float(target.peak_surface_brightness_mag_arcsec2),
+                    target.reference_band,
+                    name,
+                    target.spectrum_model,
+                    target.effective_temperature_k,
+                    target.second_reference_mag,
+                    target.second_reference_band,
+                )
+                peak_continuum_photons_arcsec2 = ab_magnitude_photon_flux_m2_s(
+                    peak_mag, spec.central_nm, spec.width_nm
+                )
+                source_surface_rate_e_s_arcsec2 = (
+                    peak_continuum_photons_arcsec2
+                    * collecting_area_m2
+                    * throughput
+                )
+            else:
+                source_surface_rate_e_s_arcsec2 = continuum_source_e_s
+
+            peak_line_rate_e_s_arcsec2 = 0.0
+            if spec.line_key:
+                peak_line_surface_flux = line_surface_flux
+                if peak_line_surface_flux <= 0.0 and effective_line_flux > 0.0:
+                    peak_line_surface_flux = effective_line_flux / aperture_area_arcsec2
+                if peak_line_surface_flux > 0.0:
+                    peak_line_photons_arcsec2 = emission_line_photon_flux_m2_s(
+                        peak_line_surface_flux * float(target.peak_line_factor),
+                        spec.central_nm,
+                    )
+                    peak_line_rate_e_s_arcsec2 = (
+                        peak_line_photons_arcsec2
+                        * collecting_area_m2
+                        * throughput
+                    )
+
+            peak_rate_e_s = (
+                (source_surface_rate_e_s_arcsec2 + peak_line_rate_e_s_arcsec2) * p**2
+                + sky_rate_e_s_arcsec2 * p**2
+                + max(0.0, float(config.dark_current_e_s_pix))
+            )
+        else:
+            peak_rate_e_s = (
+                total_source_e_s * peak_fraction
+                + sky_rate_e_s_arcsec2 * p**2
+                + max(0.0, float(config.dark_current_e_s_pix))
+            )
+        binning_charge_factor = float(max(1, int(config.binning_factor)) ** 2)
+        usable_well_e = max(
+            1.0,
+            float(config.full_well_e)
+            * binning_charge_factor
+            * float(config.saturation_fraction),
         )
-        usable_well = max(1.0, float(config.full_well_e) * float(config.saturation_fraction))
-        saturation_s = usable_well / peak_rate_e_s if peak_rate_e_s > 0 else float("inf")
+        usable_adc_e = max(
+            1.0,
+            float(config.adc_max_adu)
+            * float(config.gain_e_per_adu)
+            * float(config.saturation_fraction),
+        )
+        usable_signal_e = min(usable_well_e, usable_adc_e)
+        saturation_s = (
+            usable_signal_e / peak_rate_e_s
+            if peak_rate_e_s > 0
+            else float("inf")
+        )
         is_narrowband = name in {"H-alpha", "H-beta", "OIII", "SII"}
         configured_max = (
             float(config.max_narrowband_subexposure_s)
@@ -1560,12 +2106,32 @@ def calculate_exposure_times(
         )
 
         notes: List[str] = []
-        if line_flux > 0.0:
-            notes.append("line flux included")
+        if is_extended:
+            notes.append(
+                f"surface brightness over {aperture_area_arcsec2:.1f} arcsec^2"
+            )
+            if target.peak_surface_brightness_mag_arcsec2 is not None:
+                notes.append("peak surface brightness used for saturation")
+            else:
+                notes.append("mean surface brightness used for peak counts")
+        if target.second_reference_mag is not None and target.second_reference_band:
+            if color_used:
+                notes.append(f"color-constrained SED ({color_reason})")
+            else:
+                notes.append(f"color not applied: {color_reason or 'invalid constraint'}")
+        if is_extended and line_flux > 0.0 and float(target.peak_line_factor) > 1.0:
+            notes.append(
+                f"peak line brightness ×{float(target.peak_line_factor):g}"
+            )
+        if effective_line_flux > 0.0:
+            if line_surface_flux > 0.0:
+                notes.append("line surface flux included")
+            else:
+                notes.append("integrated line flux included")
         if desired_counts is not None:
-            safe_peak_adu = usable_well / gain
-            if desired_counts > 65535.0:
-                notes.append("desired counts exceed 16-bit ADC range")
+            safe_peak_adu = usable_signal_e / gain
+            if desired_counts > float(config.adc_max_adu):
+                notes.append("desired counts exceed configured ADC maximum")
             if desired_counts > safe_peak_adu:
                 notes.append("desired counts exceed safe-well target; saturation cap used")
             elif count_target_s > configured_max:
@@ -1579,7 +2145,7 @@ def calculate_exposure_times(
             notes.append("stack subexposures to avoid saturation")
         if np.isfinite(total_time_s) and total_time_s < float(config.minimum_practical_exposure_s):
             notes.append("defocus or use a neutral-density strategy")
-        if name in {"H-alpha", "H-beta", "OIII", "SII"} and line_flux <= 0.0:
+        if name in {"H-alpha", "H-beta", "OIII", "SII"} and effective_line_flux <= 0.0:
             notes.append("continuum-only narrowband estimate")
 
         results.append({
@@ -1603,6 +2169,61 @@ def calculate_exposure_times(
         })
 
     return results
+
+def package_self_test() -> None:
+    """Offline packaged-feature smoke test used by CI release bundles."""
+    import importlib
+
+    # Dynamic imports that PyInstaller cannot infer from planner startup alone.
+    # Import modules only; constructing some astroquery clients can trigger
+    # schema/network work in certain releases.
+    importlib.import_module("astroquery.simbad")
+    importlib.import_module("astroquery.vizier")
+    importlib.import_module("astroquery.skyview")
+    importlib.import_module("openpyxl")
+
+    # Exercise point and diffuse ETC paths.
+    point_results = calculate_exposure_times(
+        ExposureCalculatorConfig(),
+        ExposureTarget(reference_mag_ab=12.0, reference_band="Johnson V"),
+    )
+    if not point_results:
+        raise RuntimeError("Point-source exposure self-test returned no results.")
+
+    diffuse_results = calculate_exposure_times(
+        ExposureCalculatorConfig(),
+        ExposureTarget(
+            reference_mag_ab=21.0,
+            reference_band="Sloan r",
+            source_type="extended",
+            measurement_area_arcsec2=100.0,
+            peak_surface_brightness_mag_arcsec2=18.5,
+            second_reference_mag=21.5,
+            second_reference_band="Sloan g",
+        ),
+    )
+    if not diffuse_results:
+        raise RuntimeError("Diffuse-source exposure self-test returned no results.")
+
+    # Exercise rectangular finder reprojection without network access.
+    data = np.arange(64 * 64, dtype=float).reshape(64, 64)
+    wcs = WCS(naxis=2)
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.crpix = [32.5, 32.5]
+    wcs.wcs.crval = [180.0, 20.0]
+    wcs.wcs.cdelt = [-1.0 / 3600.0, 1.0 / 3600.0]
+    coord = SkyCoord(180.0 * u.deg, 20.0 * u.deg, frame="icrs")
+    fig = render_finder_figure_from_data(
+        coord, "Self Test", data, wcs, 15, "local",
+        roll_deg=17.0, fov_h_arcmin=20,
+        flip_horizontal=True,
+    )
+    try:
+        if not fig.axes:
+            raise RuntimeError("Finder self-test did not create an axis.")
+    finally:
+        plt.close(fig)
+
 
 def _norm_col(s: str) -> str:
     s = (s or "").replace("\n", " ").strip().lower()
@@ -1682,10 +2303,26 @@ def load_targets_from_file(path: str) -> pd.DataFrame:
 
     vmag_col = _pick_numeric_col(df, ["v magnitude", "V Magnitude**", "vmag", "v_mag", "mag_v", "Vmag", "V"])
 
+    def _clean_text_series(series):
+        return series.where(series.notna(), "").astype(str).replace(
+            {"nan": "", "NaN": "", "None": "", "<NA>": ""}
+        ).str.strip()
+
+    if pr_col:
+        priority = (
+            pd.to_numeric(df[pr_col], errors="coerce")
+            .fillna(3)
+            .round()
+            .clip(1, 5)
+            .astype(int)
+        )
+    else:
+        priority = pd.Series(3, index=df.index, dtype=int)
+
     return pd.DataFrame({
-        "name":     df[name_col].astype(str),
-        "ra":       df[ra_col].astype(str),
-        "dec":      df[dec_col].astype(str),
-        "priority": pd.to_numeric(df[pr_col], errors="coerce").fillna(3).astype(int) if pr_col else 3,
-        "vmag":     pd.to_numeric(df[vmag_col], errors="coerce") if vmag_col else np.nan,
+        "name": _clean_text_series(df[name_col]),
+        "ra": _clean_text_series(df[ra_col]),
+        "dec": _clean_text_series(df[dec_col]),
+        "priority": priority,
+        "vmag": pd.to_numeric(df[vmag_col], errors="coerce") if vmag_col else np.nan,
     })
