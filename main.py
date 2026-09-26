@@ -291,9 +291,18 @@ class PlanWorker(QThread):
                 if self.isInterruptionRequested():
                     return
                 self.progress.emit(index, total, f"Resolving {row.name or 'target'}…")
+
+                existing_vmag = str(row.vmag or "").strip().lower()
+                needs_vmag = existing_vmag in (
+                    "", "n/a", "na", "nan", "none", "—", "-"
+                )
+
                 try:
                     rt = core.resolve_target(
-                        row.name, row.ra, row.dec, lookup_photometry=False
+                        row.name,
+                        row.ra,
+                        row.dec,
+                        lookup_photometry=needs_vmag,
                     )
                     resolved_ok = True
                 except Exception:
