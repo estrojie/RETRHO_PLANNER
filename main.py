@@ -21,16 +21,19 @@ from matplotlib.backends.backend_qtagg import (
 from matplotlib.patches import Rectangle
 
 from PySide6.QtCore    import (
-    Qt, QThread, Signal, QDate, QSize, QTimer, QSignalBlocker, QSettings
+    Qt, QThread, Signal, QDate, QSize, QTimer, QSignalBlocker, QSettings, QUrl
 )
-from PySide6.QtGui     import QTextDocument, QFont, QFontDatabase, QImage, QPixmap, QGuiApplication
+from PySide6.QtGui     import (
+    QTextDocument, QFont, QFontDatabase, QImage, QPixmap, QGuiApplication,
+    QAction, QDesktopServices,
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QGroupBox, QFormLayout, QLabel, QPushButton, QTabWidget, QFileDialog,
     QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QSpinBox,
     QAbstractItemView, QComboBox, QDoubleSpinBox, QDateEdit, QDialog,
     QListWidget, QListWidgetItem, QCheckBox, QSizePolicy, QHeaderView,
-    QStyle, QScrollArea, QGridLayout, QAbstractSpinBox,
+    QStyle, QScrollArea, QGridLayout, QAbstractSpinBox, QProgressDialog,
 )
 
 from astropy.coordinates import SkyCoord
@@ -38,6 +41,8 @@ import astropy.units as u
 from astropy.wcs import WCS
 
 import planner_core as core
+import updater
+from rho_version import APP_VERSION
 
 def std_icon(widget: QWidget, enum_name: str):
     sp = getattr(QStyle.StandardPixmap, enum_name, None) or \
@@ -286,9 +291,18 @@ class PlanWorker(QThread):
                 if self.isInterruptionRequested():
                     return
                 self.progress.emit(index, total, f"Resolving {row.name or 'target'}…")
+
+                existing_vmag = str(row.vmag or "").strip().lower()
+                needs_vmag = existing_vmag in (
+                    "", "n/a", "na", "nan", "none", "—", "-"
+                )
+
                 try:
                     rt = core.resolve_target(
-                        row.name, row.ra, row.dec, lookup_photometry=False
+                        row.name,
+                        row.ra,
+                        row.dec,
+                        lookup_photometry=needs_vmag,
                     )
                     resolved_ok = True
                 except Exception:
@@ -369,6 +383,42 @@ class PlanWorker(QThread):
             self.finished.emit(self.request_id, updated, alt_fig, coords, names)
         except Exception as e:
             self.failed.emit(self.request_id, str(e))
+
+
+
+class UpdateCheckWorker(QThread):
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, current_version: str):
+        super().__init__()
+        self.current_version = str(current_version)
+
+    def run(self):
+        try:
+            self.finished.emit(updater.check_latest_release(self.current_version))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class UpdateDownloadWorker(QThread):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(int)
+
+    def __init__(self, release_info):
+        super().__init__()
+        self.release_info = release_info
+
+    def run(self):
+        try:
+            path = updater.download_release_asset(
+                self.release_info,
+                progress=lambda value: self.progress.emit(int(value)),
+            )
+            self.finished.emit(path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class FinderWorker(QThread):
@@ -2831,6 +2881,9 @@ class MainWindow(QMainWindow):
         self._finder_workers: set = set()
         self._plan_workers: set = set()
         self._sky_workers: set = set()
+        self._update_workers: set = set()
+        self._update_check_in_progress = False
+        self._update_progress_dialog = None
         self._sky_request_id = 0
         self._finder_request_id = 0
         self._plan_request_id = 0
@@ -2872,6 +2925,8 @@ class MainWindow(QMainWindow):
         self._main_splitter.addWidget(self._build_center_panel())
         self._main_splitter.addWidget(self._build_right_panel())
 
+        self._build_help_menu()
+
         QTimer.singleShot(0, self._restore_ui_settings)
 
         self._bind_altitude_click()
@@ -2883,6 +2938,277 @@ class MainWindow(QMainWindow):
         configure_interactive_widgets(self)
         self.apply_date_location(initial=True)
         QTimer.singleShot(250, self.refresh_sky)
+
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(6 * 60 * 60 * 1000)
+        self._update_timer.timeout.connect(
+            lambda: self.check_for_updates(interactive=False)
+        )
+        self._update_timer.start()
+
+        settings = QSettings("RETRHO", "RHOPlanner")
+        auto_updates = str(
+            settings.value("updates/auto_check", "true")
+        ).lower() in {"1", "true", "yes"}
+        self.action_auto_updates.setChecked(auto_updates)
+        if auto_updates and os.environ.get("RHO_PLANNER_SELF_TEST") != "1":
+            QTimer.singleShot(
+                1500, lambda: self.check_for_updates(interactive=False)
+            )
+
+    def _build_help_menu(self):
+        help_menu = self.menuBar().addMenu("&Help")
+
+        action_check = QAction("Check for Updates…", self)
+        action_check.triggered.connect(
+            lambda: self.check_for_updates(interactive=True)
+        )
+        help_menu.addAction(action_check)
+
+        self.action_auto_updates = QAction(
+            "Automatically Check for Updates", self
+        )
+        self.action_auto_updates.setCheckable(True)
+        self.action_auto_updates.setChecked(True)
+        self.action_auto_updates.toggled.connect(
+            self._set_automatic_update_checks
+        )
+        help_menu.addAction(self.action_auto_updates)
+
+        help_menu.addSeparator()
+
+        action_releases = QAction("View GitHub Releases", self)
+        action_releases.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(updater.RELEASES_PAGE))
+        )
+        help_menu.addAction(action_releases)
+
+        action_about = QAction("About RHO Planner", self)
+        action_about.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(action_about)
+
+    def _set_automatic_update_checks(self, enabled: bool):
+        settings = QSettings("RETRHO", "RHOPlanner")
+        settings.setValue("updates/auto_check", bool(enabled))
+
+    def _show_about_dialog(self):
+        QMessageBox.about(
+            self,
+            "About RHO Planner",
+            (
+                "<b>RHO Planner</b><br>"
+                f"Version {APP_VERSION}<br><br>"
+                "Observation planning, finder-chart inspection, and exposure "
+                "time tools for Rosemary Hill Observatory.<br><br>"
+                "Updates are distributed through the RETRHO_PLANNER GitHub "
+                "releases page."
+            ),
+        )
+
+    def check_for_updates(self, interactive: bool = True):
+        if self._update_check_in_progress:
+            if interactive:
+                self.statusBar().showMessage(
+                    "An update check is already running.", 3000
+                )
+            return
+
+        self._update_check_in_progress = True
+        if interactive:
+            self.statusBar().showMessage("Checking GitHub for updates…")
+
+        worker = UpdateCheckWorker(APP_VERSION)
+        self._update_workers.add(worker)
+
+        def _cleanup():
+            self._update_check_in_progress = False
+            self._update_workers.discard(worker)
+            worker.deleteLater()
+
+        worker.finished.connect(
+            lambda info: self._on_update_check_finished(info, interactive)
+        )
+        worker.failed.connect(
+            lambda message: self._on_update_check_failed(message, interactive)
+        )
+        worker.finished.connect(lambda *_: _cleanup())
+        worker.failed.connect(lambda *_: _cleanup())
+        worker.start()
+
+    def _on_update_check_failed(self, message: str, interactive: bool):
+        if interactive:
+            QMessageBox.warning(
+                self,
+                "Update Check Failed",
+                "RHO Planner could not check GitHub for updates.\n\n"
+                f"{message}",
+            )
+        else:
+            self.statusBar().showMessage(
+                "Automatic update check could not reach GitHub.", 4000
+            )
+
+    def _on_update_check_finished(self, info, interactive: bool):
+        if not info.comparison_supported:
+            if interactive:
+                QMessageBox.information(
+                    self,
+                    "Development Build",
+                    (
+                        f"This copy is version {APP_VERSION}, which is a "
+                        "development build. Automatic replacement is disabled "
+                        "for development builds.\n\n"
+                        f"Latest public release: {info.tag_name}"
+                    ),
+                )
+            return
+
+        if not info.update_available:
+            if interactive:
+                QMessageBox.information(
+                    self,
+                    "RHO Planner is Up to Date",
+                    (
+                        f"You are running RHO Planner {APP_VERSION}.\n"
+                        f"The latest GitHub release is {info.tag_name}."
+                    ),
+                )
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("RHO Planner Update Available")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            f"<b>RHO Planner {info.latest_version} is available.</b><br>"
+            f"You are currently running version {APP_VERSION}."
+        )
+        release_notes = (info.body or "").strip()
+        if release_notes:
+            if len(release_notes) > 1400:
+                release_notes = release_notes[:1400].rstrip() + "…"
+            box.setInformativeText(release_notes)
+
+        update_button = box.addButton("Update Now", QMessageBox.AcceptRole)
+        later_button = box.addButton("Later", QMessageBox.RejectRole)
+        release_button = box.addButton(
+            "View Release", QMessageBox.ActionRole
+        )
+        box.setDefaultButton(update_button)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is release_button:
+            QDesktopServices.openUrl(QUrl(info.html_url))
+            return
+        if clicked is not update_button:
+            return
+
+        self._begin_update_download(info)
+
+    def _begin_update_download(self, info):
+        ok, reason = updater.can_self_install()
+        if not ok:
+            box = QMessageBox(self)
+            box.setWindowTitle("Manual Update Required")
+            box.setIcon(QMessageBox.Information)
+            box.setText(
+                "This RHO Planner installation cannot replace itself automatically."
+            )
+            box.setInformativeText(reason)
+            release_button = box.addButton(
+                "Open Release Page", QMessageBox.AcceptRole
+            )
+            box.addButton("Close", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is release_button:
+                QDesktopServices.openUrl(QUrl(info.html_url))
+            return
+
+        dialog = QProgressDialog(
+            f"Downloading {info.asset_name}…", "Cancel", 0, 100, self
+        )
+        dialog.setWindowTitle("Updating RHO Planner")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(0)
+        dialog.setValue(0)
+        self._update_progress_dialog = dialog
+
+        worker = UpdateDownloadWorker(info)
+        self._update_workers.add(worker)
+        worker.progress.connect(dialog.setValue)
+
+        # requests streaming cannot be safely interrupted mid-request. Cancel
+        # hides the dialog and leaves the current installation untouched.
+        dialog.canceled.connect(dialog.hide)
+
+        def _cleanup():
+            self._update_workers.discard(worker)
+            worker.deleteLater()
+
+        worker.finished.connect(
+            lambda path: self._on_update_download_finished(path, info)
+        )
+        worker.failed.connect(self._on_update_download_failed)
+        worker.finished.connect(lambda *_: _cleanup())
+        worker.failed.connect(lambda *_: _cleanup())
+        worker.start()
+
+    def _on_update_download_failed(self, message: str):
+        dialog = self._update_progress_dialog
+        self._update_progress_dialog = None
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+        QMessageBox.warning(
+            self,
+            "Update Download Failed",
+            (
+                "The update could not be downloaded and verified. "
+                "Your current installation was not changed.\n\n"
+                f"{message}"
+            ),
+        )
+
+    def _on_update_download_finished(self, path, info):
+        dialog = self._update_progress_dialog
+        self._update_progress_dialog = None
+        if dialog is not None:
+            dialog.setValue(100)
+            dialog.close()
+            dialog.deleteLater()
+
+        try:
+            updater.launch_installer(path)
+        except Exception as exc:
+            box = QMessageBox(self)
+            box.setWindowTitle("Automatic Update Failed")
+            box.setIcon(QMessageBox.Warning)
+            box.setText(
+                "The update was downloaded and verified, but RHO Planner "
+                "could not start the replacement helper."
+            )
+            box.setInformativeText(str(exc))
+            release_button = box.addButton(
+                "Open Release Page", QMessageBox.AcceptRole
+            )
+            box.addButton("Close", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is release_button:
+                QDesktopServices.openUrl(QUrl(info.html_url))
+            return
+
+        QMessageBox.information(
+            self,
+            "Update Ready",
+            (
+                f"RHO Planner {info.latest_version} was downloaded and "
+                "verified. The planner will now close, install the update, "
+                "and restart."
+            ),
+        )
+        QApplication.instance().quit()
 
     def _restore_ui_settings(self):
         settings = QSettings("RETRHO", "RHOPlanner")
@@ -2940,6 +3266,9 @@ class MainWindow(QMainWindow):
         settings.setValue("finder/survey", self.in_survey.currentText())
         settings.setValue("finder/flip_h", self.in_flip_horizontal.isChecked())
         settings.setValue("finder/flip_v", self.in_flip_vertical.isChecked())
+        settings.setValue(
+            "updates/auto_check", self.action_auto_updates.isChecked()
+        )
 
     def _build_left_panel(self) -> QWidget:
         left   = QWidget()
@@ -3935,6 +4264,7 @@ class MainWindow(QMainWindow):
             list(self._finder_workers)
             + list(self._plan_workers)
             + list(self._sky_workers)
+            + list(self._update_workers)
         )
         for worker in workers:
             stop_worker_for_exit(worker)
@@ -4019,7 +4349,11 @@ if __name__ == "__main__":
         w = MainWindow()
         # Construction validates the cross-platform widget tree and the ETC
         # controls without entering the event loop or making network requests.
-        if not hasattr(w, "btn_plan") or not hasattr(w, "btn_update_finders"):
+        if (
+            not hasattr(w, "btn_plan")
+            or not hasattr(w, "btn_update_finders")
+            or not hasattr(w, "action_auto_updates")
+        ):
             raise RuntimeError("Main-window UI self-test failed.")
 
         w.show()
