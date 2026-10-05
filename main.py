@@ -2932,29 +2932,36 @@ class MainWindow(QMainWindow):
         self._bind_altitude_click()
         self._bind_finder_clicks()
 
-        # Apply local defaults immediately, but do not block the first paint on
-        # network/weather work.  Sky conditions are fetched after the window
-        # enters the event loop.
+        # Apply local defaults immediately. Packaged CI self-tests must remain
+        # strictly offline/background-free; otherwise their repeated
+        # app.processEvents() calls can fire the delayed weather timer and leave
+        # a network QThread alive while the test is trying to close the window.
         configure_interactive_widgets(self)
         self.apply_date_location(initial=True)
-        QTimer.singleShot(250, self.refresh_sky)
+        self._self_test_mode = (
+            os.environ.get("RHO_PLANNER_SELF_TEST") == "1"
+        )
+        if not self._self_test_mode:
+            QTimer.singleShot(250, self.refresh_sky)
 
         self._update_timer = QTimer(self)
         self._update_timer.setInterval(6 * 60 * 60 * 1000)
         self._update_timer.timeout.connect(
             lambda: self.check_for_updates(interactive=False)
         )
-        self._update_timer.start()
 
         settings = QSettings("RETRHO", "RHOPlanner")
         auto_updates = str(
             settings.value("updates/auto_check", "true")
         ).lower() in {"1", "true", "yes"}
         self.action_auto_updates.setChecked(auto_updates)
-        if auto_updates and os.environ.get("RHO_PLANNER_SELF_TEST") != "1":
-            QTimer.singleShot(
-                1500, lambda: self.check_for_updates(interactive=False)
-            )
+
+        if not self._self_test_mode:
+            self._update_timer.start()
+            if auto_updates:
+                QTimer.singleShot(
+                    1500, lambda: self.check_for_updates(interactive=False)
+                )
 
     def _build_help_menu(self):
         help_menu = self.menuBar().addMenu("&Help")
@@ -4423,7 +4430,15 @@ if __name__ == "__main__":
         _check_visible_control_geometry(etc)
 
         etc.close()
+
+        if w._sky_workers or w._update_workers:
+            raise RuntimeError(
+                "Packaged UI self-test unexpectedly started a background "
+                "network worker."
+            )
+
         w.close()
+        app.processEvents()
         sys.exit(0)
 
     w = MainWindow()
