@@ -25,7 +25,7 @@ from PySide6.QtCore    import (
 )
 from PySide6.QtGui     import (
     QTextDocument, QFont, QFontDatabase, QImage, QPixmap, QGuiApplication,
-    QAction, QDesktopServices,
+    QAction, QDesktopServices, QColor, QPalette,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -168,9 +168,61 @@ def apply_app_style(app: QApplication):
     except Exception:
         pass
 
+    # Give every platform the same dark fallback palette.  The stylesheet
+    # below still controls the detailed appearance, while this palette covers
+    # plain QWidget/QDialog/container surfaces that Linux/Fusion would
+    # otherwise paint with the host desktop's light system colors.
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor("#181a1f"))
+    palette.setColor(QPalette.WindowText, QColor("#e5e5e5"))
+    palette.setColor(QPalette.Base, QColor("#14161b"))
+    palette.setColor(QPalette.AlternateBase, QColor("#202329"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#23262c"))
+    palette.setColor(QPalette.ToolTipText, QColor("#ffffff"))
+    palette.setColor(QPalette.Text, QColor("#e5e5e5"))
+    palette.setColor(QPalette.Button, QColor("#2a2d33"))
+    palette.setColor(QPalette.ButtonText, QColor("#f0f0f0"))
+    palette.setColor(QPalette.BrightText, QColor("#ffffff"))
+    palette.setColor(QPalette.Link, QColor("#79b8ff"))
+    palette.setColor(QPalette.Highlight, QColor("#1b4f8a"))
+    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.PlaceholderText, QColor("#707784"))
+
+    # Keep disabled controls readable without falling back to the host palette.
+    palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#707784"))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#707784"))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#888888"))
+    app.setPalette(palette)
+
     app.setStyleSheet("""
     QMainWindow {
         background-color: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1f2228,stop:1 #181a1f);
+    }
+    QDialog, QMessageBox {
+        background-color:#181a1f;
+        color:#e5e5e5;
+    }
+    QWidget#mainPanel {
+        background-color:transparent;
+    }
+    QScrollArea, QScrollArea > QWidget > QWidget {
+        background-color:#181a1f;
+    }
+    QMenuBar {
+        background-color:#181a1f;
+        color:#e5e5e5;
+    }
+    QMenuBar::item:selected {
+        background-color:#353f50;
+    }
+    QMenu {
+        background-color:#202329;
+        color:#e5e5e5;
+        border:1px solid #3a3d45;
+    }
+    QMenu::item:selected {
+        background-color:#315d8a;
+        color:#ffffff;
     }
     QLabel { color: #d7d7d7; }
     QGroupBox {
@@ -3277,6 +3329,7 @@ class MainWindow(QMainWindow):
 
     def _build_left_panel(self) -> QWidget:
         left   = QWidget()
+        left.setObjectName("mainPanel")
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(6, 6, 6, 6)
         left_l.setSpacing(10)
@@ -3443,6 +3496,7 @@ class MainWindow(QMainWindow):
 
     def _build_center_panel(self) -> QWidget:
         center   = QWidget()
+        center.setObjectName("mainPanel")
         center_l = QVBoxLayout(center)
         center_l.setContentsMargins(6, 6, 6, 6)
         center_l.setSpacing(10)
@@ -3513,6 +3567,7 @@ class MainWindow(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         right   = QWidget()
+        right.setObjectName("mainPanel")
         right_l = QVBoxLayout(right)
         right_l.setContentsMargins(6, 6, 6, 6)
         right_l.setSpacing(10)
@@ -4360,6 +4415,13 @@ if __name__ == "__main__":
             or not hasattr(w, "action_auto_updates")
         ):
             raise RuntimeError("Main-window UI self-test failed.")
+
+        window_color = app.palette().color(QPalette.Window)
+        if window_color.name().lower() != "#181a1f":
+            raise RuntimeError(
+                "Dark application fallback palette was not applied: "
+                f"{window_color.name()}"
+            )
 
         w.show()
         app.processEvents()
