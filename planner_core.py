@@ -64,9 +64,12 @@ def _get_simbad():
         except Exception:
             pass
         try:
-            client.add_votable_fields("flux(V)")
+            client.add_votable_fields("V")
         except Exception:
-            pass
+            try:
+                client.add_votable_fields("flux(V)")
+            except Exception:
+                pass
         _custom_simbad = client
     return _custom_simbad
 
@@ -371,10 +374,20 @@ def lookup_v_magnitude(name: str):
         return "N/A"
     try:
         result = _get_simbad().query_object(name)
-        if result is not None:
-            for col_try in ("FLUX_V", "V", "flux(V)", "flux_V"):
-                if col_try in result.colnames:
-                    return result[col_try][0]
+        if result is None or len(result) == 0:
+            return "N/A"
+        for col_try in ("V", "FLUX_V", "flux(V)", "flux_V"):
+            if col_try not in result.colnames:
+                continue
+            value = result[col_try][0]
+            try:
+                if np.ma.is_masked(value):
+                    continue
+                value = float(value)
+                if np.isfinite(value):
+                    return value
+            except Exception:
+                continue
     except Exception:
         pass
     return "N/A"
