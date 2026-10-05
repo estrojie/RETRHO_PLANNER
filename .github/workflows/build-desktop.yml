@@ -73,6 +73,7 @@ jobs:
         run: python -m PyInstaller --noconfirm --clean --distpath dist-onefile RHOPlanner_onefile.spec
 
       - name: Packaged feature self-test
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = "offscreen"
@@ -169,6 +170,7 @@ jobs:
         run: python -m PyInstaller --noconfirm --clean RHOPlanner.spec
 
       - name: Packaged feature self-test
+        timeout-minutes: 5
         shell: bash
         run: |
           QT_QPA_PLATFORM=offscreen RHO_PLANNER_SELF_TEST=1 \
