@@ -387,7 +387,7 @@ class PlanWorker(QThread):
 
 
 class UpdateCheckWorker(QThread):
-    finished = Signal(object)
+    result_ready = Signal(object)
     failed = Signal(str)
 
     def __init__(self, current_version: str):
@@ -396,13 +396,13 @@ class UpdateCheckWorker(QThread):
 
     def run(self):
         try:
-            self.finished.emit(updater.check_latest_release(self.current_version))
+            self.result_ready.emit(updater.check_latest_release(self.current_version))
         except Exception as exc:
             self.failed.emit(str(exc))
 
 
 class UpdateDownloadWorker(QThread):
-    finished = Signal(object)
+    result_ready = Signal(object)
     failed = Signal(str)
     progress = Signal(int)
 
@@ -416,7 +416,7 @@ class UpdateDownloadWorker(QThread):
                 self.release_info,
                 progress=lambda value: self.progress.emit(int(value)),
             )
-            self.finished.emit(path)
+            self.result_ready.emit(path)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -3025,14 +3025,13 @@ class MainWindow(QMainWindow):
             self._update_workers.discard(worker)
             worker.deleteLater()
 
-        worker.finished.connect(
+        worker.result_ready.connect(
             lambda info: self._on_update_check_finished(info, interactive)
         )
         worker.failed.connect(
             lambda message: self._on_update_check_failed(message, interactive)
         )
-        worker.finished.connect(lambda *_: _cleanup())
-        worker.failed.connect(lambda *_: _cleanup())
+        worker.finished.connect(_cleanup)
         worker.start()
 
     def _on_update_check_failed(self, message: str, interactive: bool):
@@ -3147,12 +3146,11 @@ class MainWindow(QMainWindow):
             self._update_workers.discard(worker)
             worker.deleteLater()
 
-        worker.finished.connect(
+        worker.result_ready.connect(
             lambda path: self._on_update_download_finished(path, info)
         )
         worker.failed.connect(self._on_update_download_failed)
-        worker.finished.connect(lambda *_: _cleanup())
-        worker.failed.connect(lambda *_: _cleanup())
+        worker.finished.connect(_cleanup)
         worker.start()
 
     def _on_update_download_failed(self, message: str):
