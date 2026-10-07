@@ -57,7 +57,7 @@ class EphemerisDialog(QDialog):
     TYPE_OPTIONS = (
         ("Automatic", None),
         ("Small body (asteroid/comet)", "smallbody"),
-        ("Major body / satellite", "majorbody"),
+        ("Major body / satellite / spacecraft", None),
     )
 
     TABLE_COLUMNS = (
