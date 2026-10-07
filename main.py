@@ -42,6 +42,7 @@ from astropy.wcs import WCS
 
 import planner_core as core
 import updater
+from ephemeris_dialog import EphemerisDialog
 from rho_version import APP_VERSION
 
 def std_icon(widget: QWidget, enum_name: str):
@@ -1737,6 +1738,13 @@ class ExposureCalculatorDialog(QDialog):
         self._magnitude_is_user_valid = False
         self._photometry_workers: set = set()
         self.setWindowTitle("RHO Exposure Time Calculator")
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        self.setSizeGripEnabled(True)
         self._size_for_available_screen(parent)
 
         root = QVBoxLayout(self)
@@ -2923,6 +2931,7 @@ class MainWindow(QMainWindow):
         self._finder_dialog_fov1 = None
         self._finder_dialog_fov2 = None
         self._exposure_dialog    = None
+        self._ephemeris_dialog   = None
         super().__init__()
 
         self.setWindowTitle("Observing Planner (Desktop)")
@@ -3477,6 +3486,14 @@ class MainWindow(QMainWindow):
         left_l.addWidget(btn_refresh)
         left_l.addWidget(settings_box)
 
+        self.btn_ephemeris = QPushButton("Ephemeris Generator (Beta)")
+        self.btn_ephemeris.setToolTip(
+            "Generate a topocentric JPL Horizons ephemeris for Solar System targets."
+        )
+        self.btn_ephemeris.clicked.connect(self.open_ephemeris_generator)
+        style_primary_button(self.btn_ephemeris)
+        left_l.addWidget(self.btn_ephemeris)
+
         self.btn_exposure = QPushButton("Exposure Time Calculator (Beta)")
         self.btn_exposure.setToolTip(
             "Estimate exposure times and saturation-safe subexposures for all RHO filters."
@@ -3744,6 +3761,33 @@ class MainWindow(QMainWindow):
         self.lbl_upload.setWordWrap(True)
         l.addWidget(btn); l.addWidget(self.lbl_upload); l.addStretch(1)
         return w
+
+    def open_ephemeris_generator(self):
+        if self._ephemeris_dialog is not None and self._ephemeris_dialog.isVisible():
+            self._ephemeris_dialog.raise_()
+            self._ephemeris_dialog.activateWindow()
+            return
+
+        dlg = EphemerisDialog(
+            self,
+            site=core.get_site_config(),
+            planning_date=core.get_planning_date(),
+            min_alt_deg=float(self.in_min_alt.value()),
+            max_alt_deg=float(self.in_max_alt.value()),
+            finder_fov_w_arcmin=int(self.in_fov2.value()),
+            finder_fov_h_arcmin=int(self.in_fov2_h.value()),
+            finder_mode=self.in_survey.currentText(),
+            finder_roll_deg=float(self.in_roll.value()),
+            finder_flip_horizontal=self.in_flip_horizontal.isChecked(),
+            finder_flip_vertical=self.in_flip_vertical.isChecked(),
+        )
+        self._ephemeris_dialog = dlg
+        dlg.finished.connect(
+            lambda _: setattr(self, "_ephemeris_dialog", None)
+        )
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def open_exposure_calculator(self):
         row = self._selected_row
@@ -4411,6 +4455,8 @@ if __name__ == "__main__":
         # controls without entering the event loop or making network requests.
         if (
             not hasattr(w, "btn_plan")
+            or not hasattr(w, "btn_ephemeris")
+            or not hasattr(w, "open_ephemeris_generator")
             or not hasattr(w, "btn_update_finders")
             or not hasattr(w, "action_auto_updates")
         ):
@@ -4436,6 +4482,8 @@ if __name__ == "__main__":
             raise RuntimeError("Manual ETC target mode is missing.")
         if etc.etc_snr.buttonSymbols() != QAbstractSpinBox.UpDownArrows:
             raise RuntimeError("Spin-box arrow controls are not enabled.")
+        if not (etc.windowFlags() & Qt.WindowMaximizeButtonHint):
+            raise RuntimeError("Exposure calculator maximize control is missing.")
 
         def _check_visible_control_geometry(root):
             # Hidden tab-page widgets often retain Qt's tiny default geometry
@@ -4492,6 +4540,43 @@ if __name__ == "__main__":
         _check_visible_control_geometry(etc)
 
         etc.close()
+
+        eph = EphemerisDialog(
+            w,
+            site=core.get_site_config(),
+            planning_date=core.get_planning_date(),
+            min_alt_deg=float(w.in_min_alt.value()),
+            max_alt_deg=float(w.in_max_alt.value()),
+            finder_fov_w_arcmin=int(w.in_fov2.value()),
+            finder_fov_h_arcmin=int(w.in_fov2_h.value()),
+            finder_mode=w.in_survey.currentText(),
+            finder_roll_deg=float(w.in_roll.value()),
+            finder_flip_horizontal=w.in_flip_horizontal.isChecked(),
+            finder_flip_vertical=w.in_flip_vertical.isChecked(),
+        )
+        eph.show()
+        app.processEvents()
+        if (
+            not hasattr(eph, "copy_table_btn")
+            or not hasattr(eph, "copy_altitude_btn")
+            or not hasattr(eph, "generate_finder_btn")
+            or not hasattr(eph, "copy_finder_btn")
+            or not hasattr(eph, "canvas")
+            or not hasattr(eph, "finder_canvas")
+        ):
+            raise RuntimeError("Ephemeris-dialog UI self-test failed.")
+        if (
+            eph.copy_table_btn.isEnabled()
+            or eph.copy_altitude_btn.isEnabled()
+            or eph.generate_finder_btn.isEnabled()
+            or eph.copy_finder_btn.isEnabled()
+        ):
+            raise RuntimeError(
+                "Ephemeris result actions should be disabled before a query."
+            )
+        if not (eph.windowFlags() & Qt.WindowMaximizeButtonHint):
+            raise RuntimeError("Ephemeris maximize control is missing.")
+        eph.close()
 
         if w._sky_workers or w._update_workers:
             raise RuntimeError(
