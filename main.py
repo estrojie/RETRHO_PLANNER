@@ -42,6 +42,7 @@ from astropy.wcs import WCS
 
 import planner_core as core
 import updater
+from ephemeris_dialog import EphemerisDialog
 from rho_version import APP_VERSION
 
 def std_icon(widget: QWidget, enum_name: str):
@@ -2923,6 +2924,7 @@ class MainWindow(QMainWindow):
         self._finder_dialog_fov1 = None
         self._finder_dialog_fov2 = None
         self._exposure_dialog    = None
+        self._ephemeris_dialog   = None
         super().__init__()
 
         self.setWindowTitle("Observing Planner (Desktop)")
@@ -3753,6 +3755,27 @@ class MainWindow(QMainWindow):
         l.addWidget(btn); l.addWidget(self.lbl_upload); l.addStretch(1)
         return w
 
+    def open_ephemeris_generator(self):
+        if self._ephemeris_dialog is not None and self._ephemeris_dialog.isVisible():
+            self._ephemeris_dialog.raise_()
+            self._ephemeris_dialog.activateWindow()
+            return
+
+        dlg = EphemerisDialog(
+            self,
+            site=core.get_site_config(),
+            planning_date=core.get_planning_date(),
+            min_alt_deg=float(self.in_min_alt.value()),
+            max_alt_deg=float(self.in_max_alt.value()),
+        )
+        self._ephemeris_dialog = dlg
+        dlg.finished.connect(
+            lambda _: setattr(self, "_ephemeris_dialog", None)
+        )
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
     def open_exposure_calculator(self):
         row = self._selected_row
         name = row.name if row is not None else ""
@@ -4419,6 +4442,8 @@ if __name__ == "__main__":
         # controls without entering the event loop or making network requests.
         if (
             not hasattr(w, "btn_plan")
+            or not hasattr(w, "btn_ephemeris")
+            or not hasattr(w, "open_ephemeris_generator")
             or not hasattr(w, "btn_update_finders")
             or not hasattr(w, "action_auto_updates")
         ):
