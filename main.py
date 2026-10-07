@@ -3477,6 +3477,14 @@ class MainWindow(QMainWindow):
         left_l.addWidget(btn_refresh)
         left_l.addWidget(settings_box)
 
+        self.btn_ephemeris = QPushButton("Ephemeris Generator (Beta)")
+        self.btn_ephemeris.setToolTip(
+            "Generate a topocentric JPL Horizons ephemeris for Solar System targets."
+        )
+        self.btn_ephemeris.clicked.connect(self.open_ephemeris_generator)
+        style_primary_button(self.btn_ephemeris)
+        left_l.addWidget(self.btn_ephemeris)
+
         self.btn_exposure = QPushButton("Exposure Time Calculator (Beta)")
         self.btn_exposure.setToolTip(
             "Estimate exposure times and saturation-safe subexposures for all RHO filters."
