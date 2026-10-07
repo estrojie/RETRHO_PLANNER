@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -359,7 +360,9 @@ class EphemerisDialog(QDialog):
         ax.set_xlabel(f"Local time ({self.site.timezone})")
         target = str(frame.iloc[0]["target"]) if len(frame) else "Target"
         ax.set_title(f"{target} — topocentric altitude")
-        ax.xaxis.set_major_formatter(\n            mdates.DateFormatter("%H:%M", tz=ZoneInfo(self.site.timezone))\n        )
+        ax.xaxis.set_major_formatter(
+            mdates.DateFormatter("%H:%M", tz=ZoneInfo(self.site.timezone))
+        )
         ax.grid(True, alpha=0.25)
         ax.legend(loc="best")
         fig.autofmt_xdate(rotation=0)
