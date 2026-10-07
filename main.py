@@ -3767,6 +3767,12 @@ class MainWindow(QMainWindow):
             planning_date=core.get_planning_date(),
             min_alt_deg=float(self.in_min_alt.value()),
             max_alt_deg=float(self.in_max_alt.value()),
+            finder_fov_w_arcmin=int(self.in_fov2.value()),
+            finder_fov_h_arcmin=int(self.in_fov2_h.value()),
+            finder_mode=self.in_survey.currentText(),
+            finder_roll_deg=float(self.in_roll.value()),
+            finder_flip_horizontal=self.in_flip_horizontal.isChecked(),
+            finder_flip_vertical=self.in_flip_vertical.isChecked(),
         )
         self._ephemeris_dialog = dlg
         dlg.finished.connect(
@@ -4525,6 +4531,39 @@ if __name__ == "__main__":
         _check_visible_control_geometry(etc)
 
         etc.close()
+
+        eph = EphemerisDialog(
+            w,
+            site=core.get_site_config(),
+            planning_date=core.get_planning_date(),
+            min_alt_deg=float(w.in_min_alt.value()),
+            max_alt_deg=float(w.in_max_alt.value()),
+            finder_fov_w_arcmin=int(w.in_fov2.value()),
+            finder_fov_h_arcmin=int(w.in_fov2_h.value()),
+            finder_mode=w.in_survey.currentText(),
+            finder_roll_deg=float(w.in_roll.value()),
+            finder_flip_horizontal=w.in_flip_horizontal.isChecked(),
+            finder_flip_vertical=w.in_flip_vertical.isChecked(),
+        )
+        eph.show()
+        app.processEvents()
+        if (
+            not hasattr(eph, "copy_table_btn")
+            or not hasattr(eph, "copy_altitude_btn")
+            or not hasattr(eph, "generate_finder_btn")
+            or not hasattr(eph, "copy_finder_btn")
+        ):
+            raise RuntimeError("Ephemeris-dialog UI self-test failed.")
+        if (
+            eph.copy_table_btn.isEnabled()
+            or eph.copy_altitude_btn.isEnabled()
+            or eph.generate_finder_btn.isEnabled()
+            or eph.copy_finder_btn.isEnabled()
+        ):
+            raise RuntimeError(
+                "Ephemeris result actions should be disabled before a query."
+            )
+        eph.close()
 
         if w._sky_workers or w._update_workers:
             raise RuntimeError(
