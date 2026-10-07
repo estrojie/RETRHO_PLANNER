@@ -1,6 +1,7 @@
 """Qt dialog for generating JPL Horizons ephemerides."""
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -10,6 +11,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
 from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtGui import QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -27,13 +29,18 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+
 import ephemeris
+import planner_core as core
 
 
 class EphemerisWorker(QThread):
@@ -49,6 +56,76 @@ class EphemerisWorker(QThread):
             result = ephemeris.query_horizons_ephemeris(self.request)
             if not self.isInterruptionRequested():
                 self.completed.emit(result)
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(exc))
+
+
+class EphemerisFinderWorker(QThread):
+    completed = Signal(object, str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        target_name: str,
+        epoch_label: str,
+        ra_deg: float,
+        dec_deg: float,
+        fov_w_arcmin: int,
+        fov_h_arcmin: int,
+        mode: str,
+        roll_deg: float,
+        flip_horizontal: bool,
+        flip_vertical: bool,
+    ):
+        super().__init__()
+        self.target_name = str(target_name)
+        self.epoch_label = str(epoch_label)
+        self.ra_deg = float(ra_deg)
+        self.dec_deg = float(dec_deg)
+        self.fov_w_arcmin = int(fov_w_arcmin)
+        self.fov_h_arcmin = int(fov_h_arcmin)
+        self.mode = str(mode)
+        self.roll_deg = float(roll_deg)
+        self.flip_horizontal = bool(flip_horizontal)
+        self.flip_vertical = bool(flip_vertical)
+
+    def run(self):
+        try:
+            coord = SkyCoord(
+                self.ra_deg * u.deg,
+                self.dec_deg * u.deg,
+                frame="icrs",
+            )
+            data, wcs, survey_label = core.fetch_finder_raw(
+                coord,
+                self.fov_w_arcmin,
+                self.mode,
+                fov_h_arcmin=self.fov_h_arcmin,
+            )
+            if self.isInterruptionRequested():
+                return
+            if data is None or wcs is None:
+                raise RuntimeError(
+                    "No finder image was returned for this position and survey."
+                )
+
+            display_name = f"{self.target_name} — {self.epoch_label}"
+            fig = core.render_finder_figure_from_data(
+                coord,
+                display_name,
+                data,
+                wcs,
+                self.fov_w_arcmin,
+                survey_label,
+                self.roll_deg,
+                fov_h_arcmin=self.fov_h_arcmin,
+                flip_horizontal=self.flip_horizontal,
+                flip_vertical=self.flip_vertical,
+            )
+            if not self.isInterruptionRequested():
+                self.completed.emit(fig, survey_label)
         except Exception as exc:
             if not self.isInterruptionRequested():
                 self.failed.emit(str(exc))
@@ -83,6 +160,12 @@ class EphemerisDialog(QDialog):
         planning_date,
         min_alt_deg: float,
         max_alt_deg: float,
+        finder_fov_w_arcmin: int = 20,
+        finder_fov_h_arcmin: int = 20,
+        finder_mode: str = "DSS",
+        finder_roll_deg: float = 0.0,
+        finder_flip_horizontal: bool = False,
+        finder_flip_vertical: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle("JPL Horizons Ephemeris Generator")
@@ -93,7 +176,14 @@ class EphemerisDialog(QDialog):
         self.planning_date = planning_date
         self.min_alt_deg = float(min_alt_deg)
         self.max_alt_deg = float(max_alt_deg)
+        self.finder_fov_w_arcmin = int(finder_fov_w_arcmin)
+        self.finder_fov_h_arcmin = int(finder_fov_h_arcmin)
+        self.finder_mode = str(finder_mode)
+        self.finder_roll_deg = float(finder_roll_deg)
+        self.finder_flip_horizontal = bool(finder_flip_horizontal)
+        self.finder_flip_vertical = bool(finder_flip_vertical)
         self._worker = None
+        self._finder_worker = None
         self._result = None
 
         root = QVBoxLayout(self)
@@ -177,21 +267,65 @@ class EphemerisDialog(QDialog):
         self.table.setHorizontalHeaderLabels([c[0] for c in self.TABLE_COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.itemSelectionChanged.connect(self._on_epoch_selection_changed)
         self.table.setAlternatingRowColors(True)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         header = self.table.horizontalHeader()
         for col in range(len(self.TABLE_COLUMNS)):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
+
+        table_tools = QHBoxLayout()
+        self.copy_table_btn = QPushButton("Copy Ephemeris Table")
+        self.copy_table_btn.clicked.connect(self.copy_table_image)
+        self.copy_table_btn.setEnabled(False)
+        table_tools.addWidget(self.copy_table_btn)
+        table_tools.addStretch(1)
+        table_layout.addLayout(table_tools)
         table_layout.addWidget(self.table)
         splitter.addWidget(table_box)
 
-        plot_box = QGroupBox("Altitude")
-        plot_layout = QVBoxLayout(plot_box)
+        self.plot_tabs = QTabWidget()
+
+        altitude_page = QWidget()
+        altitude_layout = QVBoxLayout(altitude_page)
+        altitude_layout.setContentsMargins(6, 6, 6, 6)
+        altitude_tools = QHBoxLayout()
+        self.copy_altitude_btn = QPushButton("Copy Altitude Plot")
+        self.copy_altitude_btn.clicked.connect(self.copy_altitude_plot)
+        self.copy_altitude_btn.setEnabled(False)
+        altitude_tools.addWidget(self.copy_altitude_btn)
+        altitude_tools.addStretch(1)
+        altitude_layout.addLayout(altitude_tools)
         self.canvas = FigureCanvas(self._empty_figure())
-        plot_layout.addWidget(self.canvas)
-        splitter.addWidget(plot_box)
-        splitter.setSizes([390, 300])
+        altitude_layout.addWidget(self.canvas, 1)
+        self.plot_tabs.addTab(altitude_page, "Altitude")
+
+        finder_page = QWidget()
+        finder_layout = QVBoxLayout(finder_page)
+        finder_layout.setContentsMargins(6, 6, 6, 6)
+        finder_tools = QHBoxLayout()
+        self.finder_epoch_label = QLabel(
+            "Select an ephemeris row to choose the finder-chart epoch."
+        )
+        self.finder_epoch_label.setWordWrap(True)
+        self.generate_finder_btn = QPushButton("Generate Finder Chart")
+        self.generate_finder_btn.clicked.connect(self.generate_finder_chart)
+        self.generate_finder_btn.setEnabled(False)
+        self.copy_finder_btn = QPushButton("Copy Finder Chart")
+        self.copy_finder_btn.clicked.connect(self.copy_finder_chart)
+        self.copy_finder_btn.setEnabled(False)
+        finder_tools.addWidget(self.finder_epoch_label, 1)
+        finder_tools.addWidget(self.generate_finder_btn)
+        finder_tools.addWidget(self.copy_finder_btn)
+        finder_layout.addLayout(finder_tools)
+        self.finder_canvas = FigureCanvas(self._empty_finder_figure())
+        finder_layout.addWidget(self.finder_canvas, 1)
+        self.plot_tabs.addTab(finder_page, "Finder Chart")
+
+        splitter.addWidget(self.plot_tabs)
+        splitter.setSizes([390, 320])
 
         close_row = QHBoxLayout()
         close_row.addStretch(1)
@@ -199,6 +333,21 @@ class EphemerisDialog(QDialog):
         close_btn.clicked.connect(self.close)
         close_row.addWidget(close_btn)
         root.addLayout(close_row)
+
+    @staticmethod
+    def _empty_finder_figure():
+        fig, ax = plt.subplots(figsize=(7.0, 5.0))
+        ax.text(
+            0.5,
+            0.5,
+            "Select an ephemeris row, then generate a finder chart.",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+        ax.set_axis_off()
+        fig.tight_layout()
+        return fig
 
     @staticmethod
     def _empty_figure():
@@ -239,6 +388,10 @@ class EphemerisDialog(QDialog):
         self.generate_btn.setEnabled(False)
         self.generate_btn.setText("Querying JPL Horizons…")
         self.export_btn.setEnabled(False)
+        self.copy_table_btn.setEnabled(False)
+        self.copy_altitude_btn.setEnabled(False)
+        self.generate_finder_btn.setEnabled(False)
+        self.copy_finder_btn.setEnabled(False)
         self.status_label.setText(
             f"Querying JPL Horizons for {request.target!r}. "
             "This requires an internet connection."
@@ -275,6 +428,9 @@ class EphemerisDialog(QDialog):
         self._populate_table(frame)
         self._set_plot(self._build_altitude_figure(frame))
         self.export_btn.setEnabled(True)
+        self.copy_table_btn.setEnabled(True)
+        self.copy_altitude_btn.setEnabled(True)
+        self._select_default_epoch()
 
         windows = ephemeris.altitude_windows(
             frame,
@@ -330,6 +486,202 @@ class EphemerisDialog(QDialog):
                 value = row.get(column, "")
                 item = QTableWidgetItem(self._display_value(column, value))
                 self.table.setItem(r, c, item)
+
+
+    def _select_default_epoch(self):
+        if self._result is None or self._result.empty:
+            return
+
+        alt = pd.to_numeric(
+            self._result["alt_deg"], errors="coerce"
+        ).to_numpy(dtype=float)
+        finite = np.isfinite(alt)
+        allowed = (
+            finite
+            & (alt >= self.min_alt_deg)
+            & (alt <= self.max_alt_deg)
+        )
+        candidates = np.flatnonzero(allowed)
+        if len(candidates):
+            row = int(candidates[np.argmax(alt[candidates])])
+        else:
+            candidates = np.flatnonzero(finite)
+            row = int(candidates[np.argmax(alt[candidates])]) if len(candidates) else 0
+
+        row = max(0, min(row, self.table.rowCount() - 1))
+        self.table.setCurrentCell(row, 0)
+        self.table.selectRow(row)
+        item = self.table.item(row, 0)
+        if item is not None:
+            self.table.scrollToItem(item)
+
+    def _selected_row(self):
+        if self._result is None or self._result.empty:
+            return None
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._result):
+            return None
+        return self._result.iloc[row]
+
+    def _on_epoch_selection_changed(self):
+        row = self._selected_row()
+        if row is None:
+            self.finder_epoch_label.setText(
+                "Select an ephemeris row to choose the finder-chart epoch."
+            )
+            self.generate_finder_btn.setEnabled(False)
+            return
+
+        timestamp = pd.Timestamp(row["time_local"])
+        ra = str(row.get("ra_hms", ""))
+        dec = str(row.get("dec_dms", ""))
+        alt = self._display_value("alt_deg", row.get("alt_deg", np.nan))
+        self.finder_epoch_label.setText(
+            f"Finder epoch: {timestamp.strftime('%Y-%m-%d %H:%M %Z')}  |  "
+            f"RA {ra}  Dec {dec}  |  Alt {alt}°"
+        )
+        self.generate_finder_btn.setEnabled(True)
+
+    def generate_finder_chart(self):
+        if self._finder_worker is not None and self._finder_worker.isRunning():
+            return
+
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(
+                self,
+                "Select an Epoch",
+                "Select an ephemeris row before generating a finder chart.",
+            )
+            return
+
+        try:
+            ra_deg = float(row["ra_deg"])
+            dec_deg = float(row["dec_deg"])
+            if not np.isfinite(ra_deg) or not np.isfinite(dec_deg):
+                raise ValueError("The selected ephemeris row has no usable RA/Dec.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Finder Chart", str(exc))
+            return
+
+        timestamp = pd.Timestamp(row["time_local"])
+        epoch_label = timestamp.strftime("%Y-%m-%d %H:%M %Z")
+        target = str(row.get("target", "")).strip() or self.target_edit.text().strip()
+
+        self.generate_finder_btn.setEnabled(False)
+        self.generate_finder_btn.setText("Loading Finder…")
+        self.copy_finder_btn.setEnabled(False)
+        self.finder_epoch_label.setText(
+            f"Loading {self.finder_mode} finder for {target} at {epoch_label}…"
+        )
+
+        worker = EphemerisFinderWorker(
+            target_name=target,
+            epoch_label=epoch_label,
+            ra_deg=ra_deg,
+            dec_deg=dec_deg,
+            fov_w_arcmin=self.finder_fov_w_arcmin,
+            fov_h_arcmin=self.finder_fov_h_arcmin,
+            mode=self.finder_mode,
+            roll_deg=self.finder_roll_deg,
+            flip_horizontal=self.finder_flip_horizontal,
+            flip_vertical=self.finder_flip_vertical,
+        )
+        self._finder_worker = worker
+        worker.completed.connect(
+            lambda fig, survey: self._finder_finished(
+                fig, survey, target, epoch_label
+            )
+        )
+        worker.failed.connect(self._finder_failed)
+        worker.finished.connect(self._finder_worker_finished)
+        worker.start()
+
+    def _finder_finished(self, figure, survey_label: str, target: str, epoch_label: str):
+        self._set_finder_plot(figure)
+        self.copy_finder_btn.setEnabled(True)
+        self.plot_tabs.setCurrentIndex(1)
+        self.finder_epoch_label.setText(
+            f"{target} at {epoch_label} — {survey_label}; "
+            f"FOV {self.finder_fov_w_arcmin}′ × {self.finder_fov_h_arcmin}′"
+        )
+
+    def _finder_failed(self, message: str):
+        QMessageBox.warning(
+            self,
+            "Finder Chart Failed",
+            "RHO Planner could not generate the finder chart.\n\n"
+            f"{message}",
+        )
+        self._on_epoch_selection_changed()
+
+    def _finder_worker_finished(self):
+        self.generate_finder_btn.setEnabled(self._selected_row() is not None)
+        self.generate_finder_btn.setText("Generate Finder Chart")
+        worker = self._finder_worker
+        self._finder_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _set_finder_plot(self, figure):
+        parent = self.finder_canvas.parentWidget()
+        layout = parent.layout()
+        layout.removeWidget(self.finder_canvas)
+        try:
+            plt.close(self.finder_canvas.figure)
+        except Exception:
+            pass
+        self.finder_canvas.setParent(None)
+        self.finder_canvas = FigureCanvas(figure)
+        layout.addWidget(self.finder_canvas, 1)
+
+    def _copy_figure(self, figure, success_message: str):
+        try:
+            buf = BytesIO()
+            figure.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+            image = QImage.fromData(buf.getvalue(), "PNG")
+            if image.isNull():
+                raise RuntimeError("Failed to create clipboard image.")
+            QGuiApplication.clipboard().setPixmap(QPixmap.fromImage(image))
+            self.status_label.setText(success_message)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Clipboard Error",
+                f"Could not copy image.\n\n{exc}",
+            )
+
+    def copy_table_image(self):
+        if self._result is None or self._result.empty:
+            return
+        try:
+            pixmap = self.table.grab()
+            if pixmap.isNull():
+                raise RuntimeError("Failed to capture the ephemeris table.")
+            QGuiApplication.clipboard().setPixmap(pixmap)
+            self.status_label.setText(
+                "Visible ephemeris table copied to the clipboard."
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Clipboard Error",
+                f"Could not copy the ephemeris table.\n\n{exc}",
+            )
+
+    def copy_altitude_plot(self):
+        self._copy_figure(
+            self.canvas.figure,
+            "Altitude plot copied to the clipboard.",
+        )
+
+    def copy_finder_chart(self):
+        if not self.copy_finder_btn.isEnabled():
+            return
+        self._copy_figure(
+            self.finder_canvas.figure,
+            "Finder chart copied to the clipboard.",
+        )
 
     def _build_altitude_figure(self, frame):
         fig, ax = plt.subplots(figsize=(8.5, 3.4))
@@ -408,12 +760,18 @@ class EphemerisDialog(QDialog):
         export.to_csv(Path(path), index=False)
         self.status_label.setText(f"Exported ephemeris to {path}")
 
+    @staticmethod
+    def _stop_worker(worker):
+        if worker is None or not worker.isRunning():
+            return
+        worker.requestInterruption()
+        if not worker.wait(1200):
+            worker.terminate()
+            worker.wait(500)
+
     def closeEvent(self, event):
-        worker = self._worker
-        if worker is not None and worker.isRunning():
-            worker.requestInterruption()
-            if not worker.wait(1200):
-                worker.terminate()
-                worker.wait(500)
+        self._stop_worker(self._worker)
+        self._stop_worker(self._finder_worker)
         self._worker = None
+        self._finder_worker = None
         event.accept()
