@@ -1738,6 +1738,13 @@ class ExposureCalculatorDialog(QDialog):
         self._magnitude_is_user_valid = False
         self._photometry_workers: set = set()
         self.setWindowTitle("RHO Exposure Time Calculator")
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        self.setSizeGripEnabled(True)
         self._size_for_available_screen(parent)
 
         root = QVBoxLayout(self)
@@ -4475,6 +4482,8 @@ if __name__ == "__main__":
             raise RuntimeError("Manual ETC target mode is missing.")
         if etc.etc_snr.buttonSymbols() != QAbstractSpinBox.UpDownArrows:
             raise RuntimeError("Spin-box arrow controls are not enabled.")
+        if not (etc.windowFlags() & Qt.WindowMaximizeButtonHint):
+            raise RuntimeError("Exposure calculator maximize control is missing.")
 
         def _check_visible_control_geometry(root):
             # Hidden tab-page widgets often retain Qt's tiny default geometry
@@ -4552,6 +4561,8 @@ if __name__ == "__main__":
             or not hasattr(eph, "copy_altitude_btn")
             or not hasattr(eph, "generate_finder_btn")
             or not hasattr(eph, "copy_finder_btn")
+            or not hasattr(eph, "canvas")
+            or not hasattr(eph, "finder_canvas")
         ):
             raise RuntimeError("Ephemeris-dialog UI self-test failed.")
         if (
@@ -4563,6 +4574,8 @@ if __name__ == "__main__":
             raise RuntimeError(
                 "Ephemeris result actions should be disabled before a query."
             )
+        if not (eph.windowFlags() & Qt.WindowMaximizeButtonHint):
+            raise RuntimeError("Ephemeris maximize control is missing.")
         eph.close()
 
         if w._sky_workers or w._update_workers:
