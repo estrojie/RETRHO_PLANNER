@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -169,8 +170,15 @@ class EphemerisDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("JPL Horizons Ephemeris Generator")
-        self.resize(1180, 760)
-        self.setMinimumSize(820, 560)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+        self.setSizeGripEnabled(True)
+        self.resize(1450, 900)
+        self.setMinimumSize(960, 640)
 
         self.site = site
         self.planning_date = planning_date
@@ -190,16 +198,31 @@ class EphemerisDialog(QDialog):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
+        workspace = QGridLayout()
+        workspace.setContentsMargins(0, 0, 0, 0)
+        workspace.setHorizontalSpacing(10)
+        workspace.setVerticalSpacing(10)
+        workspace.setColumnStretch(0, 1)
+        workspace.setColumnStretch(1, 1)
+        workspace.setRowStretch(0, 1)
+        workspace.setRowStretch(1, 1)
+        root.addLayout(workspace, 1)
+
+        # Top-left: request/data-entry area.
+        setup = QGroupBox("Ephemeris Request")
+        setup_layout = QVBoxLayout(setup)
+        setup_layout.setContentsMargins(10, 10, 10, 10)
+        setup_layout.setSpacing(8)
+
         intro = QLabel(
             "Generate a topocentric JPL Horizons ephemeris for the planner's "
             "active observatory and observing night. Times are shown in the "
             "site timezone and cover 17:00–07:00."
         )
         intro.setWordWrap(True)
-        root.addWidget(intro)
+        setup_layout.addWidget(intro)
 
-        setup = QGroupBox("Ephemeris Request")
-        form = QFormLayout(setup)
+        form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.target_edit = QLineEdit()
@@ -236,7 +259,7 @@ class EphemerisDialog(QDialog):
         form.addRow("Sampling:", self.step_spin)
         form.addRow("Observatory:", self.site_label)
         form.addRow("Night:", self.date_label)
-        root.addWidget(setup)
+        setup_layout.addLayout(form)
 
         actions = QHBoxLayout()
         self.generate_btn = QPushButton("Generate Ephemeris")
@@ -251,18 +274,49 @@ class EphemerisDialog(QDialog):
         actions.addWidget(self.generate_btn)
         actions.addWidget(self.export_btn)
         actions.addStretch(1)
-        root.addLayout(actions)
+        setup_layout.addLayout(actions)
 
-        self.status_label = QLabel("Enter a Solar System target and generate an ephemeris.")
+        self.status_label = QLabel(
+            "Enter a Solar System target and generate an ephemeris."
+        )
         self.status_label.setWordWrap(True)
-        root.addWidget(self.status_label)
+        setup_layout.addWidget(self.status_label)
+        setup_layout.addStretch(1)
+        workspace.addWidget(setup, 0, 0)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter, 1)
+        # Top-right: altitude plot.
+        altitude_box = QGroupBox("Altitude")
+        altitude_layout = QVBoxLayout(altitude_box)
+        altitude_layout.setContentsMargins(8, 8, 8, 8)
+        altitude_layout.setSpacing(6)
 
-        table_box = QGroupBox("Ephemeris")
+        altitude_tools = QHBoxLayout()
+        self.copy_altitude_btn = QPushButton("Copy Altitude Plot")
+        self.copy_altitude_btn.clicked.connect(self.copy_altitude_plot)
+        self.copy_altitude_btn.setEnabled(False)
+        altitude_tools.addWidget(self.copy_altitude_btn)
+        altitude_tools.addStretch(1)
+        altitude_layout.addLayout(altitude_tools)
+
+        self.canvas = FigureCanvas(self._empty_figure())
+        self.canvas.setMinimumSize(320, 220)
+        altitude_layout.addWidget(self.canvas, 1)
+        workspace.addWidget(altitude_box, 0, 1)
+
+        # Bottom-left: ephemeris table.
+        table_box = QGroupBox("Ephemeris Table")
         table_layout = QVBoxLayout(table_box)
+        table_layout.setContentsMargins(8, 8, 8, 8)
+        table_layout.setSpacing(6)
+
+        table_tools = QHBoxLayout()
+        self.copy_table_btn = QPushButton("Copy Full Ephemeris Table")
+        self.copy_table_btn.clicked.connect(self.copy_table_image)
+        self.copy_table_btn.setEnabled(False)
+        table_tools.addWidget(self.copy_table_btn)
+        table_tools.addStretch(1)
+        table_layout.addLayout(table_tools)
+
         self.table = QTableWidget(0, len(self.TABLE_COLUMNS))
         self.table.setHorizontalHeaderLabels([c[0] for c in self.TABLE_COLUMNS])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -271,61 +325,42 @@ class EphemerisDialog(QDialog):
         self.table.itemSelectionChanged.connect(self._on_epoch_selection_changed)
         self.table.setAlternatingRowColors(True)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         header = self.table.horizontalHeader()
         for col in range(len(self.TABLE_COLUMNS)):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
+        table_layout.addWidget(self.table, 1)
+        workspace.addWidget(table_box, 1, 0)
 
-        table_tools = QHBoxLayout()
-        self.copy_table_btn = QPushButton("Copy Ephemeris Table")
-        self.copy_table_btn.clicked.connect(self.copy_table_image)
-        self.copy_table_btn.setEnabled(False)
-        table_tools.addWidget(self.copy_table_btn)
-        table_tools.addStretch(1)
-        table_layout.addLayout(table_tools)
-        table_layout.addWidget(self.table)
-        splitter.addWidget(table_box)
+        # Bottom-right: epoch-specific finder chart.
+        finder_box = QGroupBox("Finder Chart")
+        finder_layout = QVBoxLayout(finder_box)
+        finder_layout.setContentsMargins(8, 8, 8, 8)
+        finder_layout.setSpacing(6)
 
-        self.plot_tabs = QTabWidget()
-
-        altitude_page = QWidget()
-        altitude_layout = QVBoxLayout(altitude_page)
-        altitude_layout.setContentsMargins(6, 6, 6, 6)
-        altitude_tools = QHBoxLayout()
-        self.copy_altitude_btn = QPushButton("Copy Altitude Plot")
-        self.copy_altitude_btn.clicked.connect(self.copy_altitude_plot)
-        self.copy_altitude_btn.setEnabled(False)
-        altitude_tools.addWidget(self.copy_altitude_btn)
-        altitude_tools.addStretch(1)
-        altitude_layout.addLayout(altitude_tools)
-        self.canvas = FigureCanvas(self._empty_figure())
-        altitude_layout.addWidget(self.canvas, 1)
-        self.plot_tabs.addTab(altitude_page, "Altitude")
-
-        finder_page = QWidget()
-        finder_layout = QVBoxLayout(finder_page)
-        finder_layout.setContentsMargins(6, 6, 6, 6)
-        finder_tools = QHBoxLayout()
         self.finder_epoch_label = QLabel(
             "Select an ephemeris row to choose the finder-chart epoch."
         )
         self.finder_epoch_label.setWordWrap(True)
+        finder_layout.addWidget(self.finder_epoch_label)
+
+        finder_tools = QHBoxLayout()
         self.generate_finder_btn = QPushButton("Generate Finder Chart")
         self.generate_finder_btn.clicked.connect(self.generate_finder_chart)
         self.generate_finder_btn.setEnabled(False)
         self.copy_finder_btn = QPushButton("Copy Finder Chart")
         self.copy_finder_btn.clicked.connect(self.copy_finder_chart)
         self.copy_finder_btn.setEnabled(False)
-        finder_tools.addWidget(self.finder_epoch_label, 1)
         finder_tools.addWidget(self.generate_finder_btn)
         finder_tools.addWidget(self.copy_finder_btn)
+        finder_tools.addStretch(1)
         finder_layout.addLayout(finder_tools)
-        self.finder_canvas = FigureCanvas(self._empty_finder_figure())
-        finder_layout.addWidget(self.finder_canvas, 1)
-        self.plot_tabs.addTab(finder_page, "Finder Chart")
 
-        splitter.addWidget(self.plot_tabs)
-        splitter.setSizes([390, 320])
+        self.finder_canvas = FigureCanvas(self._empty_finder_figure())
+        self.finder_canvas.setMinimumSize(320, 220)
+        finder_layout.addWidget(self.finder_canvas, 1)
+        workspace.addWidget(finder_box, 1, 1)
 
         close_row = QHBoxLayout()
         close_row.addStretch(1)
@@ -600,7 +635,6 @@ class EphemerisDialog(QDialog):
     def _finder_finished(self, figure, survey_label: str, target: str, epoch_label: str):
         self._set_finder_plot(figure)
         self.copy_finder_btn.setEnabled(True)
-        self.plot_tabs.setCurrentIndex(1)
         self.finder_epoch_label.setText(
             f"{target} at {epoch_label} — {survey_label}; "
             f"FOV {self.finder_fov_w_arcmin}′ × {self.finder_fov_h_arcmin}′"
@@ -635,10 +669,29 @@ class EphemerisDialog(QDialog):
         self.finder_canvas = FigureCanvas(figure)
         layout.addWidget(self.finder_canvas, 1)
 
-    def _copy_figure(self, figure, success_message: str):
+    def _copy_figure(
+        self,
+        figure,
+        success_message: str,
+        *,
+        export_size_inches: tuple[float, float],
+        export_dpi: int = 220,
+    ):
+        """Copy a figure at a stable export size, independent of window geometry."""
+        original_size = tuple(float(v) for v in figure.get_size_inches())
         try:
+            figure.set_size_inches(*export_size_inches, forward=False)
+            try:
+                figure.tight_layout()
+            except Exception:
+                pass
             buf = BytesIO()
-            figure.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+            figure.savefig(
+                buf,
+                format="png",
+                dpi=int(export_dpi),
+                bbox_inches="tight",
+            )
             image = QImage.fromData(buf.getvalue(), "PNG")
             if image.isNull():
                 raise RuntimeError("Failed to create clipboard image.")
@@ -650,41 +703,118 @@ class EphemerisDialog(QDialog):
                 "Clipboard Error",
                 f"Could not copy image.\n\n{exc}",
             )
+        finally:
+            try:
+                figure.set_size_inches(*original_size, forward=False)
+                figure.canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _build_full_table_export_widget(self):
+        export_table = QTableWidget(
+            self.table.rowCount(),
+            self.table.columnCount(),
+            self,
+        )
+        export_table.setAttribute(Qt.WA_DontShowOnScreen, True)
+        export_table.setHorizontalHeaderLabels(
+            [label for label, _column in self.TABLE_COLUMNS]
+        )
+        export_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        export_table.setAlternatingRowColors(True)
+        export_table.setWordWrap(False)
+        export_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        export_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        export_table.verticalHeader().setVisible(False)
+
+        for r in range(self.table.rowCount()):
+            for c in range(self.table.columnCount()):
+                source = self.table.item(r, c)
+                export_table.setItem(
+                    r,
+                    c,
+                    QTableWidgetItem(source.text() if source is not None else ""),
+                )
+
+        export_table.resizeColumnsToContents()
+        export_table.resizeRowsToContents()
+
+        # Keep columns readable without allowing one field to dominate the export.
+        for c in range(export_table.columnCount()):
+            export_table.setColumnWidth(
+                c,
+                max(78, min(export_table.columnWidth(c) + 12, 260)),
+            )
+        for r in range(export_table.rowCount()):
+            export_table.setRowHeight(r, max(24, export_table.rowHeight(r)))
+
+        width = (
+            export_table.frameWidth() * 2
+            + sum(export_table.columnWidth(c) for c in range(export_table.columnCount()))
+            + 4
+        )
+        height = (
+            export_table.frameWidth() * 2
+            + export_table.horizontalHeader().height()
+            + sum(export_table.rowHeight(r) for r in range(export_table.rowCount()))
+            + 4
+        )
+        export_table.resize(int(width), int(height))
+        export_table.ensurePolished()
+        return export_table, int(width), int(height)
 
     def copy_table_image(self):
         if self._result is None or self._result.empty:
             return
+        export_table = None
         try:
-            pixmap = self.table.grab()
+            export_table, width, height = self._build_full_table_export_widget()
+            pixmap = QPixmap(width, height)
+            pixmap.fill(Qt.transparent)
+            export_table.render(pixmap)
             if pixmap.isNull():
-                raise RuntimeError("Failed to capture the ephemeris table.")
+                raise RuntimeError("Failed to render the full ephemeris table.")
             QGuiApplication.clipboard().setPixmap(pixmap)
             self.status_label.setText(
-                "Visible ephemeris table copied to the clipboard."
+                f"Full ephemeris table copied ({self.table.rowCount()} rows)."
             )
         except Exception as exc:
             QMessageBox.warning(
                 self,
                 "Clipboard Error",
-                f"Could not copy the ephemeris table.\n\n{exc}",
+                f"Could not copy the full ephemeris table.\n\n{exc}",
             )
+        finally:
+            if export_table is not None:
+                export_table.deleteLater()
 
     def copy_altitude_plot(self):
-        self._copy_figure(
-            self.canvas.figure,
-            "Altitude plot copied to the clipboard.",
+        if self._result is None or self._result.empty:
+            return
+        export_fig = self._build_altitude_figure(
+            self._result,
+            figsize=(11.0, 5.5),
         )
+        try:
+            self._copy_figure(
+                export_fig,
+                "Altitude plot copied at full export size.",
+                export_size_inches=(11.0, 5.5),
+            )
+        finally:
+            plt.close(export_fig)
 
     def copy_finder_chart(self):
         if not self.copy_finder_btn.isEnabled():
             return
         self._copy_figure(
             self.finder_canvas.figure,
-            "Finder chart copied to the clipboard.",
+            "Finder chart copied at full export size.",
+            export_size_inches=(8.0, 8.0),
         )
 
-    def _build_altitude_figure(self, frame):
-        fig, ax = plt.subplots(figsize=(8.5, 3.4))
+    def _build_altitude_figure(self, frame, figsize=(8.5, 3.4)):
+        fig, ax = plt.subplots(figsize=figsize)
         times = pd.DatetimeIndex(frame["time_local"])
         alt = pd.to_numeric(frame["alt_deg"], errors="coerce").to_numpy(dtype=float)
 
