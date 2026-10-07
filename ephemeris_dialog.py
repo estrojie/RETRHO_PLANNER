@@ -359,7 +359,7 @@ class EphemerisDialog(QDialog):
         ax.set_xlabel(f"Local time ({self.site.timezone})")
         target = str(frame.iloc[0]["target"]) if len(frame) else "Target"
         ax.set_title(f"{target} — topocentric altitude")
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        ax.xaxis.set_major_formatter(\n            mdates.DateFormatter("%H:%M", tz=ZoneInfo(self.site.timezone))\n        )
         ax.grid(True, alpha=0.25)
         ax.legend(loc="best")
         fig.autofmt_xdate(rotation=0)
