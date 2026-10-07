@@ -11,7 +11,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
 from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QGuiApplication, QImage, QPixmap
+from PySide6.QtGui import QFont, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -310,7 +310,18 @@ class EphemerisDialog(QDialog):
         table_layout.setSpacing(6)
 
         table_tools = QHBoxLayout()
-        self.copy_table_btn = QPushButton("Copy Full Ephemeris Table")
+        table_tools.addWidget(QLabel("Log image cadence:"))
+        self.copy_cadence_combo = QComboBox()
+        for minutes in (5, 10, 15, 30, 60):
+            self.copy_cadence_combo.addItem(f"{minutes} min", minutes)
+        self.copy_cadence_combo.setCurrentText("15 min")
+        self.copy_cadence_combo.setToolTip(
+            "Sampling used only for the copied observing-log image. "
+            "The on-screen table and CSV keep the full ephemeris sampling."
+        )
+        table_tools.addWidget(self.copy_cadence_combo)
+
+        self.copy_table_btn = QPushButton("Copy Readable Table")
         self.copy_table_btn.clicked.connect(self.copy_table_image)
         self.copy_table_btn.setEnabled(False)
         table_tools.addWidget(self.copy_table_btn)
@@ -710,9 +721,50 @@ class EphemerisDialog(QDialog):
             except Exception:
                 pass
 
-    def _build_full_table_export_widget(self):
+    def _log_export_rows(self) -> list[int]:
+        """Choose readable rows for the clipboard image without changing raw data."""
+        if self._result is None or self._result.empty:
+            return []
+
+        requested_minutes = int(self.copy_cadence_combo.currentData() or 15)
+        times = pd.DatetimeIndex(self._result["time_local"])
+        if len(times) <= 1:
+            return [0]
+
+        # Select rows nearest to a regular cadence anchored at the first sample.
+        start = times[0]
+        stop = times[-1]
+        wanted = pd.date_range(
+            start=start,
+            end=stop,
+            freq=f"{requested_minutes}min",
+        )
+        time_ns = times.asi8
+        selected = []
+        for target in wanted:
+            target_ns = pd.Timestamp(target).value
+            pos = int(np.searchsorted(time_ns, target_ns))
+            choices = []
+            if 0 <= pos < len(times):
+                choices.append(pos)
+            if 0 <= pos - 1 < len(times):
+                choices.append(pos - 1)
+            if choices:
+                best = min(
+                    choices,
+                    key=lambda idx: abs(int(time_ns[idx]) - int(target_ns)),
+                )
+                if not selected or best != selected[-1]:
+                    selected.append(best)
+
+        if selected and selected[-1] != len(times) - 1:
+            selected.append(len(times) - 1)
+        return selected or list(range(len(times)))
+
+    def _build_log_table_export_widget(self):
+        rows = self._log_export_rows()
         export_table = QTableWidget(
-            self.table.rowCount(),
+            len(rows),
             self.table.columnCount(),
             self,
         )
@@ -727,11 +779,18 @@ class EphemerisDialog(QDialog):
         export_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         export_table.verticalHeader().setVisible(False)
 
-        for r in range(self.table.rowCount()):
+        font = QFont(export_table.font())
+        font.setPointSize(max(10, font.pointSize() + 2))
+        export_table.setFont(font)
+        header_font = QFont(font)
+        header_font.setBold(True)
+        export_table.horizontalHeader().setFont(header_font)
+
+        for export_r, source_r in enumerate(rows):
             for c in range(self.table.columnCount()):
-                source = self.table.item(r, c)
+                source = self.table.item(source_r, c)
                 export_table.setItem(
-                    r,
+                    export_r,
                     c,
                     QTableWidgetItem(source.text() if source is not None else ""),
                 )
@@ -739,50 +798,51 @@ class EphemerisDialog(QDialog):
         export_table.resizeColumnsToContents()
         export_table.resizeRowsToContents()
 
-        # Keep columns readable without allowing one field to dominate the export.
         for c in range(export_table.columnCount()):
             export_table.setColumnWidth(
                 c,
-                max(78, min(export_table.columnWidth(c) + 12, 260)),
+                max(96, min(export_table.columnWidth(c) + 20, 320)),
             )
         for r in range(export_table.rowCount()):
-            export_table.setRowHeight(r, max(24, export_table.rowHeight(r)))
+            export_table.setRowHeight(r, max(30, export_table.rowHeight(r) + 6))
 
         width = (
             export_table.frameWidth() * 2
             + sum(export_table.columnWidth(c) for c in range(export_table.columnCount()))
-            + 4
+            + 6
         )
         height = (
             export_table.frameWidth() * 2
             + export_table.horizontalHeader().height()
             + sum(export_table.rowHeight(r) for r in range(export_table.rowCount()))
-            + 4
+            + 6
         )
         export_table.resize(int(width), int(height))
         export_table.ensurePolished()
-        return export_table, int(width), int(height)
+        return export_table, int(width), int(height), rows
 
     def copy_table_image(self):
         if self._result is None or self._result.empty:
             return
         export_table = None
         try:
-            export_table, width, height = self._build_full_table_export_widget()
+            export_table, width, height, rows = self._build_log_table_export_widget()
             pixmap = QPixmap(width, height)
             pixmap.fill(Qt.transparent)
             export_table.render(pixmap)
             if pixmap.isNull():
-                raise RuntimeError("Failed to render the full ephemeris table.")
+                raise RuntimeError("Failed to render the ephemeris log table.")
             QGuiApplication.clipboard().setPixmap(pixmap)
+            cadence = int(self.copy_cadence_combo.currentData() or 15)
             self.status_label.setText(
-                f"Full ephemeris table copied ({self.table.rowCount()} rows)."
+                f"Readable ephemeris table copied ({len(rows)} rows at "
+                f"approximately {cadence}-minute cadence)."
             )
         except Exception as exc:
             QMessageBox.warning(
                 self,
                 "Clipboard Error",
-                f"Could not copy the full ephemeris table.\n\n{exc}",
+                f"Could not copy the ephemeris table.\n\n{exc}",
             )
         finally:
             if export_table is not None:
