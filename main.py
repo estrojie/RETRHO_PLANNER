@@ -41,6 +41,7 @@ import astropy.units as u
 from astropy.wcs import WCS
 
 import planner_core as core
+import iers_support
 import updater
 from ephemeris_dialog import EphemerisDialog
 from rho_version import APP_VERSION
@@ -3401,12 +3402,19 @@ class MainWindow(QMainWindow):
         self.lbl_moon_illum = QLabel("—")
         self.lbl_cloud_now  = QLabel("—")
         self.lbl_cloud_next = QLabel("—")
+        self.lbl_iers_status = QLabel(iers_support.status_message())
+        self.lbl_iers_status.setWordWrap(True)
+        self.lbl_iers_status.setToolTip(
+            "IERS Earth-orientation data used for sunset, Moon, and altitude calculations. "
+            "Offline/stale tables may reduce pointing accuracy."
+        )
 
         sky_form.addRow("Sunset (plan date):",   self.lbl_sunset)
         sky_form.addRow("Moon alt (20:00 plan date):", self.lbl_moon_alt)
         sky_form.addRow("Moon illum (20:00 plan date):", self.lbl_moon_illum)
         sky_form.addRow("Current cloud cover:", self.lbl_cloud_now)
         sky_form.addRow("Current cloud (+1 hr):", self.lbl_cloud_next)
+        sky_form.addRow("Earth orientation:", self.lbl_iers_status)
 
         btn_refresh = QPushButton("Refresh")
         btn_refresh.setIcon(std_icon(self, "SP_BrowserReload"))
@@ -3835,16 +3843,19 @@ class MainWindow(QMainWindow):
             self.lbl_sunset.setText(
                 sunset.strftime("%Y-%m-%d %H:%M") if sunset else "unavailable"
             )
+            self.lbl_sunset.setToolTip(cond.get("sunset_error", ""))
 
             moon_alt = cond.get("moon_alt_deg")
             self.lbl_moon_alt.setText(
                 f"{moon_alt:.1f}°" if moon_alt is not None else "unavailable"
             )
+            self.lbl_moon_alt.setToolTip(cond.get("moon_alt_error", ""))
 
             illum = cond.get("moon_illum_frac")
             self.lbl_moon_illum.setText(
                 f"{illum*100:.1f}%" if illum is not None else "unavailable"
             )
+            self.lbl_moon_illum.setToolTip(cond.get("moon_illum_error", ""))
 
             cloud_now = cond.get("cloud_now_pct")
             self.lbl_cloud_now.setText(
@@ -4590,4 +4601,13 @@ if __name__ == "__main__":
 
     w = MainWindow()
     w.show()
+
+    # Runs after the window appears. Never block plotting or sky calculations
+    # on IERS network access, and do not start networking in packaged self-tests.
+    iers_support.start_background_refresh()
+    w._iers_status_timer = QTimer(w)
+    w._iers_status_timer.timeout.connect(
+        lambda: w.lbl_iers_status.setText(iers_support.status_message())
+    )
+    w._iers_status_timer.start(2000)
     sys.exit(app.exec())

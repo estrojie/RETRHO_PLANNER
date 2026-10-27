@@ -15,16 +15,16 @@ import matplotlib.dates as mdates
 import astropy.units as u
 from astropy.time import Time
 from astropy.coordinates import SkyCoord, EarthLocation
-from astropy.utils import iers
 from astropy.visualization import ZScaleInterval
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 from astropy.io import fits
 from io import BytesIO, StringIO
 from astroplan import Observer, FixedTarget
-# RHO Planner ships astropy-iers-data, so use the bundled table at startup.
-# This avoids first-run network downloads delaying the GUI by several seconds.
-iers.conf.auto_download = False
+# All Astroplan calculations use an offline-safe table. Updates are managed
+# separately on a background thread by iers_support.
+import iers_support
+iers_support.configure_iers()
 
 DEFAULT_LAT          = 29.400041
 DEFAULT_LON          = -82.585953
@@ -548,18 +548,21 @@ def sky_conditions(
 
     try:
         out["sunset_local"] = obs.sun_set_time(anchor, which="nearest").to_datetime(timezone=obs.timezone)
-    except Exception:
+    except Exception as exc:
         out["sunset_local"] = None
+        out["sunset_error"] = str(exc)
 
     try:
         out["moon_alt_deg"] = float(obs.moon_altaz(anchor).alt.deg)
-    except Exception:
+    except Exception as exc:
         out["moon_alt_deg"] = None
+        out["moon_alt_error"] = str(exc)
 
     try:
         out["moon_illum_frac"] = float(obs.moon_illumination(anchor))
-    except Exception:
+    except Exception as exc:
         out["moon_illum_frac"] = None
+        out["moon_illum_error"] = str(exc)
 
     return out
 
