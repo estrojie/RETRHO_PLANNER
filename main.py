@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QSpinBox,
     QAbstractItemView, QComboBox, QDoubleSpinBox, QDateEdit, QDialog,
     QListWidget, QListWidgetItem, QCheckBox, QSizePolicy, QHeaderView,
-    QStyle, QScrollArea, QGridLayout, QAbstractSpinBox, QProgressDialog,
+    QStyle, QScrollArea, QGridLayout, QAbstractSpinBox, QProgressDialog, QSlider,
 )
 
 from astropy.coordinates import SkyCoord
@@ -813,6 +813,7 @@ class FinderInspectorDialog(QDialog):
                           bbox=dict(boxstyle="round,pad=0.18", alpha=0.65))
         self._marker_labels.append(num_txt)
         created.append(num_txt)
+        self._apply_annotation_opacity()
         return created, num_txt
 
     def _coord_from_click(self, ax, x: float, y: float) -> SkyCoord | None:
@@ -872,6 +873,7 @@ class FinderInspectorDialog(QDialog):
         self._free_xs     = []
         self._free_ys     = []
         self._id_workers  = set()
+        self._target_x_artist = None
 
         self._roll_timer = QTimer(self)
         self._roll_timer.setSingleShot(True)
@@ -981,9 +983,33 @@ class FinderInspectorDialog(QDialog):
         self.btn_measure  = _mk("Measure Separation", "measure")
         self.btn_identify = _mk("Identify Star",      "identify")
 
+        # This is an overlay toggle, not a click/draw mode. The red X denotes
+        # the requested sky coordinate (or chart center if none was provided).
+        self.btn_target_x = QPushButton("Target X")
+        self.btn_target_x.setCheckable(True)
+        self.btn_target_x.setToolTip(
+            "Toggle a small red X at the target's WCS coordinates. "
+            "If no target coordinate was supplied, mark the chart center."
+        )
+        self.btn_target_x.toggled.connect(self._update_target_x)
+
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setSingleStep(5)
+        self.opacity_slider.setPageStep(10)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setToolTip(
+            "Opacity of the target X, shapes, freehand lines, measurements, "
+            "and identified/guide-star annotations (0–100%)."
+        )
+        self.opacity_value = QLabel("100%")
+        self.opacity_slider.valueChanged.connect(self._on_annotation_opacity_changed)
+
         self.btn_clear_ann = QPushButton("Clear Annotations")
         self.btn_clear_ann.setIcon(std_icon(self, "SP_TrashIcon"))
-        self.btn_clear_ann.clicked.connect(self._clear_annotations)
+        self.btn_clear_ann.clicked.connect(
+            lambda: self._clear_annotations(reset_target=True)
+        )
 
         tool_buttons = (
             self.btn_rect, self.btn_circle, self.btn_free,
@@ -991,7 +1017,12 @@ class FinderInspectorDialog(QDialog):
         )
         for i, w in enumerate(tool_buttons):
             tools_l.addWidget(w, i // 3, i % 3)
-        tools_l.addWidget(self.btn_clear_ann, 2, 0, 1, 3)
+        tools_l.addWidget(self.btn_target_x, 2, 0)
+        tools_l.addWidget(self.btn_clear_ann, 2, 1, 1, 2)
+        tools_l.addWidget(QLabel("Annotation opacity:"), 3, 0)
+        tools_l.addWidget(self.opacity_slider, 3, 1)
+        tools_l.addWidget(self.opacity_value, 3, 2)
+        tools_l.setColumnStretch(1, 1)
         self.left_l.addWidget(tools_box)
 
         plotw = QWidget()
@@ -1061,6 +1092,80 @@ class FinderInspectorDialog(QDialog):
         configure_interactive_widgets(self)
         self._update_title_wcs_hint()
 
+    def _on_annotation_opacity_changed(self, value: int) -> None:
+        self.opacity_value.setText(f"{int(value)}%")
+        self._apply_annotation_opacity()
+
+    def _apply_annotation_opacity(self) -> None:
+        """Update all user-created marks, including measurement and label boxes.
+
+        Store the original label-box transparency so a second slider movement
+        doesn't compound the previous alpha value.
+        """
+        opacity = self.opacity_slider.value() / 100.0
+        artists = (
+            list(self._ann_artists)
+            + list(self._ann_texts)
+            + list(self._marker_labels)
+            + list(self._measure_markers)
+        )
+        if self._measure_artist is not None:
+            if isinstance(self._measure_artist, (list, tuple)):
+                artists.extend(self._measure_artist)
+            else:
+                artists.append(self._measure_artist)
+        artists.extend(
+            (self._rect_patch, self._circle_patch, self._free_line,
+             self._target_x_artist)
+        )
+
+        seen = set()
+        for artist in artists:
+            if artist is None or id(artist) in seen:
+                continue
+            seen.add(id(artist))
+            try:
+                artist.set_alpha(opacity)
+            except Exception:
+                continue
+            try:
+                bbox = artist.get_bbox_patch()
+                if bbox is not None:
+                    if not hasattr(bbox, "_rho_base_alpha"):
+                        original = bbox.get_alpha()
+                        bbox._rho_base_alpha = 1.0 if original is None else original
+                    bbox.set_alpha(bbox._rho_base_alpha * opacity)
+            except (AttributeError, TypeError):
+                pass
+
+        if self.canvas is not None:
+            self.canvas.draw_idle()
+
+    def _update_target_x(self, _checked=None) -> None:
+        """Keep one red X fixed to the target's displayed WCS coordinates."""
+        if self._target_x_artist is not None:
+            self._remove_artists([self._target_x_artist])
+            self._target_x_artist = None
+
+        ax = self._ax()
+        if (ax is None or not self.btn_target_x.isChecked()):
+            if self.canvas is not None:
+                self.canvas.draw_idle()
+            return
+
+        wcs = getattr(ax, "_rho_wcs", None)
+        shape = getattr(ax, "_rho_data_shape", None)
+        xy = core.finder_target_pixel(wcs, self._raw_coord, shape)
+        if xy is not None:
+            self._target_x_artist = ax.plot(
+                [xy[0]], [xy[1]], marker="x", linestyle="None",
+                color="#ff4545", markersize=10, markeredgewidth=2.0,
+                zorder=30,
+            )[0]
+            self._apply_annotation_opacity()
+        elif self.canvas is not None:
+            self.canvas.draw_idle()
+
     def _sizehint_for_text(self, txt: str) -> QSize:
         doc = QTextDocument()
         doc.setDefaultFont(self.list_ident.font())
@@ -1106,10 +1211,13 @@ class FinderInspectorDialog(QDialog):
         self._cid_move  = self.canvas.mpl_connect("motion_notify_event",   self._on_move)
         self._cid_rel   = self.canvas.mpl_connect("button_release_event",  self._on_release)
         self._cid_leave = self.canvas.mpl_connect("figure_leave_event",    self._on_figure_leave)
+        # Recompute the overlay after reprojecting, rolling, or flipping.
+        self._target_x_artist = None
+        self._update_target_x()
 
     def set_figure(self, fig, raw_data=None, raw_wcs=None, raw_coord=None,
                    raw_survey="", raw_fov_w=90, raw_fov_h=None):
-        self._clear_annotations()
+        self._clear_annotations(reset_target=False)
         if raw_data is not None:
             self._raw_data   = raw_data
             self._raw_wcs    = raw_wcs
@@ -1264,6 +1372,8 @@ class FinderInspectorDialog(QDialog):
 
         elif self.mode == "identify":
             self._identify_at_click(ax, x, y)
+        # Newly drawn marks inherit the current slider value immediately.
+        self._apply_annotation_opacity()
 
     def _on_move(self, event):
         self._update_coord_readout(event)
@@ -1336,7 +1446,7 @@ class FinderInspectorDialog(QDialog):
             self._marker_labels.append(num_artist)
             created_artists.append(num_artist)
 
-        self.canvas.draw_idle()
+        self._apply_annotation_opacity()
 
         if add_to_list:
             base_txt  = str(label) if label else "Marker"
@@ -1395,9 +1505,12 @@ class FinderInspectorDialog(QDialog):
                        ha="left", va="bottom",
                        bbox=dict(boxstyle="round,pad=0.25", alpha=0.6))
         self._measure_artist = (line, txt)
-        self.canvas.draw_idle()
+        self._apply_annotation_opacity()
 
-    def _clear_annotations(self):
+    def _clear_annotations(self, reset_target: bool = True):
+        if reset_target:
+            self.btn_target_x.setChecked(False)
+            self._update_target_x()
         ax = self._ax()
         if ax is None:
             return
@@ -1634,7 +1747,7 @@ class FinderInspectorDialog(QDialog):
                 flip_horizontal=self.btn_flip_h.isChecked(),
                 flip_vertical=self.btn_flip_v.isChecked(),
             )
-            self._clear_annotations()
+            self._clear_annotations(reset_target=False)
             self._replace_plot(fig)
             self._update_title_wcs_hint()
             try: self.parent_window.in_roll.blockSignals(True)

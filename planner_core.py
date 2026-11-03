@@ -836,6 +836,39 @@ def format_finder_cursor(
 
     return f"Pixel x={xf:.2f}, y={yf:.2f}" if include_pixel else ""
 
+def finder_target_pixel(
+    wcs: WCS | None,
+    coord: SkyCoord | None,
+    image_shape: tuple[int, int] | None,
+) -> tuple[float, float] | None:
+    """Position of the requested target on a displayed finder image.
+
+    Use the displayed chart WCS, not raw-image pixels, so rolls and flips
+    preserve the correct sky position.  Use the image center only if no
+    explicit target coordinate exists; never mislabel an off-frame target
+    as the center.
+    """
+    if wcs is None or image_shape is None or len(image_shape) < 2:
+        return None
+    ny, nx = int(image_shape[-2]), int(image_shape[-1])
+    if nx < 2 or ny < 2:
+        return None
+
+    if coord is None:
+        return (nx - 1.0) / 2.0, (ny - 1.0) / 2.0
+
+    try:
+        x, y = wcs.celestial.world_to_pixel(coord.icrs)
+        x, y = float(x), float(y)
+        if (np.isfinite(x) and np.isfinite(y)
+                and -0.5 <= x <= nx - 0.5
+                and -0.5 <= y <= ny - 0.5):
+            return x, y
+    except Exception:
+        pass
+    return None
+
+
 def render_finder_figure_from_data(
     coord:        SkyCoord,
     name:         str,

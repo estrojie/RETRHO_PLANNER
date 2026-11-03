@@ -127,6 +127,42 @@ class ExposureRegressionTests(unittest.TestCase):
         b = {r["filter"]: r for r in core.calculate_exposure_times(cfg3, target)}
         self.assertGreaterEqual(b["r"]["saturation_time_s"], a["r"]["saturation_time_s"])
 
+    def test_target_x_uses_display_wcs_after_roll_and_flip(self):
+        """Use the target's WCS location rather than a guessed pixel center."""
+        data = np.ones((180, 180), dtype=float)
+        wcs = WCS(naxis=2)
+        wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        wcs.wcs.crpix = [90.5, 90.5]
+        wcs.wcs.crval = [180.0, 20.0]
+        wcs.wcs.cdelt = [-10.0 / 3600.0, 10.0 / 3600.0]
+        target = SkyCoord(180.0 * u.deg, 20.0 * u.deg, frame="icrs")
+
+        fig = core.render_finder_figure_from_data(
+            target, "Test", data, wcs, 10, "local", roll_deg=31.0,
+            flip_horizontal=True, flip_vertical=True,
+        )
+        try:
+            ax = fig.axes[0]
+            marked = core.finder_target_pixel(
+                ax._rho_wcs, target, ax._rho_data_shape,
+            )
+            expected = ax._rho_wcs.world_to_pixel(target)
+            self.assertIsNotNone(marked)
+            np.testing.assert_allclose(marked, expected, atol=1e-5)
+        finally:
+            core.plt.close(fig)
+
+    def test_target_x_center_fallback_and_missing_wcs(self):
+        wcs = WCS(naxis=2)
+        wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        wcs.wcs.crpix = [50.5, 35.5]
+        wcs.wcs.crval = [180.0, 20.0]
+        wcs.wcs.cdelt = [-10.0 / 3600.0, 10.0 / 3600.0]
+        self.assertEqual(core.finder_target_pixel(wcs, None, (70, 100)), (49.5, 34.5))
+        self.assertIsNone(core.finder_target_pixel(None, None, (70, 100)))
+        off_frame = SkyCoord(10.0 * u.deg, -40.0 * u.deg, frame="icrs")
+        self.assertIsNone(core.finder_target_pixel(wcs, off_frame, (70, 100)))
+
     def test_rectangular_finder_render_tracks_requested_shape(self):
         data = np.arange(200 * 200, dtype=float).reshape(200, 200)
         wcs = WCS(naxis=2)
